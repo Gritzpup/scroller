@@ -17,6 +17,14 @@
     if (isScrolling) return;
     isScrolling = true;
 
+    // Send scroll start command to Reddit window via postMessage
+    if (redditWindow && !redditWindow.closed) {
+      redditWindow.postMessage(
+        { type: 'SCROLLER_START', scrollSpeed },
+        '*'
+      );
+    }
+
     scrollInterval = setInterval(() => {
       // Only scroll if window is still open
       if (redditWindow && !redditWindow.closed) {
@@ -24,8 +32,8 @@
         const timeSinceLastMouse = Date.now() - lastMouseTime;
 
         if (timeSinceLastMouse > inactivityDelay) {
-          // Scroll the Reddit window
-          redditWindow.scrollBy(0, scrollSpeed);
+          // Focus the Reddit window
+          redditWindow.focus();
         }
       }
     }, SCROLL_INTERVAL);
@@ -37,6 +45,14 @@
     if (scrollInterval) {
       clearInterval(scrollInterval);
       scrollInterval = null;
+    }
+
+    // Send scroll stop command to Reddit window
+    if (redditWindow && !redditWindow.closed) {
+      redditWindow.postMessage(
+        { type: 'SCROLLER_STOP' },
+        '*'
+      );
     }
   }
 
@@ -97,6 +113,14 @@
       redditWindow = null;
     }
     stopScrolling();
+  }
+
+  // Update scroll speed on Reddit window when changed
+  $: if (isScrolling && redditWindow && !redditWindow.closed) {
+    redditWindow.postMessage(
+      { type: 'SCROLLER_UPDATE_SPEED', scrollSpeed },
+      '*'
+    );
   }
 
   onMount(() => {
