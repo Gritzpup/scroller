@@ -9,20 +9,53 @@
   let scrollSpeed = 3; // pixels per scroll event
   let inactivityDelay = 5000; // 5 seconds in milliseconds
   let redditWindow = null;
+  let redditScrollInterval = null; // Interval ID in the Reddit window
 
   const SCROLL_INTERVAL = 1000; // Check every 1 second if should scroll
+
+  // Inject scrolling function into Reddit window
+  function injectScrollingIntoReddit() {
+    if (!redditWindow || redditWindow.closed) return;
+
+    try {
+      // Inject a scroll function that we can call
+      redditWindow.redditScrollSpeed = scrollSpeed;
+      redditWindow.startRedditScroll = function() {
+        if (redditWindow.redditScrollInterval) {
+          clearInterval(redditWindow.redditScrollInterval);
+        }
+        redditWindow.redditScrollInterval = setInterval(() => {
+          redditWindow.scrollBy(0, redditWindow.redditScrollSpeed);
+        }, 1000);
+      };
+      redditWindow.stopRedditScroll = function() {
+        if (redditWindow.redditScrollInterval) {
+          clearInterval(redditWindow.redditScrollInterval);
+          redditWindow.redditScrollInterval = null;
+        }
+      };
+    } catch (error) {
+      console.log('Could not inject into Reddit window (cross-origin)');
+    }
+  }
 
   // Start auto-scroll
   function startScrolling() {
     if (isScrolling) return;
     isScrolling = true;
 
-    // Send scroll start command to Reddit window via postMessage
-    if (redditWindow && !redditWindow.closed) {
-      redditWindow.postMessage(
-        { type: 'SCROLLER_START', scrollSpeed },
-        '*'
-      );
+    // Inject the scroll functions into Reddit window
+    injectScrollingIntoReddit();
+
+    // Try to call the function we injected
+    if (redditWindow && !redditWindow.closed && redditWindow.startRedditScroll) {
+      try {
+        redditWindow.redditScrollSpeed = scrollSpeed;
+        redditWindow.startRedditScroll();
+        console.log('✅ Started scrolling in Reddit window');
+      } catch (error) {
+        console.log('Could not start scrolling (cross-origin):', error);
+      }
     }
 
     scrollInterval = setInterval(() => {
@@ -34,6 +67,11 @@
         if (timeSinceLastMouse > inactivityDelay) {
           // Focus the Reddit window
           redditWindow.focus();
+
+          // Update scroll speed
+          if (redditWindow.redditScrollSpeed !== undefined) {
+            redditWindow.redditScrollSpeed = scrollSpeed;
+          }
         }
       }
     }, SCROLL_INTERVAL);
@@ -47,12 +85,14 @@
       scrollInterval = null;
     }
 
-    // Send scroll stop command to Reddit window
-    if (redditWindow && !redditWindow.closed) {
-      redditWindow.postMessage(
-        { type: 'SCROLLER_STOP' },
-        '*'
-      );
+    // Stop scrolling in Reddit window
+    if (redditWindow && !redditWindow.closed && redditWindow.stopRedditScroll) {
+      try {
+        redditWindow.stopRedditScroll();
+        console.log('✅ Stopped scrolling in Reddit window');
+      } catch (error) {
+        console.log('Could not stop scrolling');
+      }
     }
   }
 
@@ -115,12 +155,13 @@
     stopScrolling();
   }
 
-  // Update scroll speed on Reddit window when changed
+  // Update scroll speed when changed
   $: if (isScrolling && redditWindow && !redditWindow.closed) {
-    redditWindow.postMessage(
-      { type: 'SCROLLER_UPDATE_SPEED', scrollSpeed },
-      '*'
-    );
+    try {
+      redditWindow.redditScrollSpeed = scrollSpeed;
+    } catch (error) {
+      // Cross-origin, ignore
+    }
   }
 
   onMount(() => {
