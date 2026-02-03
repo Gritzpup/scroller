@@ -34,6 +34,33 @@ function getSessionCookies(sessionId) {
   return sessionCookies.get(sessionId);
 }
 
+// Proxy for static resources (CSS, JS, images from redditstatic)
+app.all('/proxy-static/*', async (req, res) => {
+  try {
+    const path = req.path.substring('/proxy-static/'.length);
+    const resourceUrl = `https://www.redditstatic.com/${path}${req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''}`;
+
+    console.log(`📦 Proxying static: ${resourceUrl}`);
+
+    const response = await fetch(resourceUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+      }
+    });
+
+    const contentType = response.headers.get('content-type');
+    res.setHeader('Content-Type', contentType || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+
+    const buffer = await response.buffer();
+    res.send(buffer);
+  } catch (error) {
+    console.error('❌ Static proxy error:', error.message);
+    res.status(500).json({ error: 'Static proxy error', message: error.message });
+  }
+});
+
 // Direct proxy for any path
 app.all('/*', async (req, res) => {
   try {
@@ -125,21 +152,36 @@ app.all('/*', async (req, res) => {
   <script>
     window.__proxyIntercept = true;
 
+    function rewriteUrl(url) {
+      if (typeof url !== 'string') return url;
+      // Route reddit URLs through proxy
+      if (url.startsWith('https://old.reddit.com')) {
+        return url.substring('https://old.reddit.com'.length) || '/';
+      }
+      if (url.startsWith('https://reddit.com')) {
+        return url.substring('https://reddit.com'.length) || '/';
+      }
+      if (url.startsWith('https://www.reddit.com')) {
+        return url.substring('https://www.reddit.com'.length) || '/';
+      }
+      // Route external static resources through proxy
+      if (url.startsWith('https://www.redditstatic.com')) {
+        return '/proxy-static/' + url.substring('https://www.redditstatic.com/'.length);
+      }
+      return url;
+    }
+
     // Override XMLHttpRequest before any other code runs
     const OriginalXHR = window.XMLHttpRequest;
     window.XMLHttpRequest = function() {
       const xhr = new OriginalXHR();
       const originalOpen = xhr.open;
-
       xhr.open = function(method, url, ...args) {
-        // Route old.reddit.com URLs through proxy
         if (typeof url === 'string') {
-          url = url.replace(/^https:\/\/old\.reddit\.com/g, '');
-          if (!url.startsWith('/')) url = '/' + url;
+          url = rewriteUrl(url);
         }
         return originalOpen.apply(this, [method, url, ...args]);
       };
-
       return xhr;
     };
     window.XMLHttpRequest.prototype = OriginalXHR.prototype;
@@ -148,8 +190,7 @@ app.all('/*', async (req, res) => {
     const originalFetch = window.fetch;
     window.fetch = function(resource, config) {
       if (typeof resource === 'string') {
-        resource = resource.replace(/^https:\/\/old\.reddit\.com/g, '');
-        if (!resource.startsWith('/')) resource = '/' + resource;
+        resource = rewriteUrl(resource);
       }
       return originalFetch.apply(this, [resource, config]);
     };
