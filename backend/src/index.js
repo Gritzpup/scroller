@@ -70,36 +70,28 @@ app.all('/*', async (req, res) => {
 
     const response = await fetch(redditUrl, fetchOptions);
 
-    // Store new cookies
+    const contentType = response.headers.get('content-type');
+
+    // Store cookies server-side and rewrite for browser storage
     const setCookieHeader = response.headers.get('set-cookie');
+    const setCookieHeaders = [];
     if (setCookieHeader) {
       const cookieStrings = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
       cookieStrings.forEach(cookieStr => {
+        // Store in server-side session
         const cookiePair = cookieStr.split(';')[0];
         const cookieName = cookiePair.split('=')[0];
-
         const existing = cookies.findIndex(c => c.split('=')[0] === cookieName);
         if (existing >= 0) {
           cookies[existing] = cookiePair;
         } else {
           cookies.push(cookiePair);
         }
-      });
-    }
 
-    const contentType = response.headers.get('content-type');
-
-    // Rewrite Set-Cookie headers to work with proxy domain
-    const setCookieHeader = response.headers.get('set-cookie');
-    const setCookieHeaders = [];
-    if (setCookieHeader) {
-      const cookieStrings = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
-      cookieStrings.forEach(cookieStr => {
-        // Remove Domain directive so browser treats it as a host-only cookie for localhost:5178
-        // Also remove SameSite=None requirement since we're not cross-site
-        cookieStr = cookieStr.replace(/;\s*Domain=[^;]*/gi, '');
-        cookieStr = cookieStr.replace(/;\s*SameSite=None/gi, '');
-        setCookieHeaders.push(cookieStr);
+        // Rewrite for browser storage (remove Domain so it becomes host-only cookie)
+        let rewritten = cookieStr.replace(/;\s*Domain=[^;]*/gi, '');
+        rewritten = rewritten.replace(/;\s*SameSite=None/gi, '');
+        setCookieHeaders.push(rewritten);
       });
     }
 
