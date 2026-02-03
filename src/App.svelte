@@ -73,14 +73,13 @@
   function loginToReddit() {
     console.log('🔐 Login button clicked');
     console.log('  proxyUrl:', proxyUrl);
-    console.log('  iframeElement:', iframeElement);
 
     // Get fresh reference to iframe
     const frame = document.querySelector('iframe');
     if (frame) {
-      console.log('✅ Found iframe, reloading for login...');
-      // Hard refresh with cache-busting
-      frame.src = proxyUrl + '?t=' + Date.now();
+      console.log('✅ Navigating iframe to login page...');
+      // Navigate to the login page with cache-busting
+      frame.src = proxyUrl + 'login/?t=' + Date.now();
     } else {
       console.error('❌ Iframe element not found');
     }
