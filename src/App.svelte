@@ -1,22 +1,191 @@
 <script>
   import { onMount } from 'svelte';
 
-  let isScrolling = false;
-  let mouseInactive = false;
-  let mouseInactiveTimer = null;
-  let scrollInterval = null;
-  let lastMouseTime = Date.now();
-  let scrollSpeed = 3; // pixels per scroll event
-  let inactivityDelay = 5000; // 5 seconds in milliseconds
   let redditWindow = null;
+  let redditReady = false;
+  let isScrolling = false;
+  let scrollSpeed = 3;
+  let inactivityDelay = 5000;
+  let error = '';
+  let statusMessage = '';
+  let messageQueue = [];
+  let lastMouseTime = Date.now();
+  let scrollInterval = null;
+  let scriptInstalled = false;
+  let checkingScript = false;
+  let testWindow = null;
 
-  const SCROLL_INTERVAL = 1000; // Check every 1 second if should scroll
+  const SCROLL_INTERVAL = 100; // Check every 100ms if we should scroll
+  const SCRIPT_CHECK_TIMEOUT = 10000; // 10 seconds to detect script
 
-  // Send command to Reddit window via postMessage
+  // Listen for messages from Reddit window
+  onMount(() => {
+    window.addEventListener('message', (event) => {
+      // Only accept messages from Reddit
+      if (!event.origin.includes('reddit.com')) {
+        return;
+      }
+
+      const data = event.data;
+
+      if (!data || !data.type) {
+        return;
+      }
+
+      console.log('📨 Message from Reddit:', data.type);
+
+      if (data.type === 'SCROLLER_READY') {
+        console.log('✅ Reddit window is ready!');
+
+        // Check if this is from the test window (during script detection)
+        if (checkingScript && testWindow) {
+          console.log('✅ Script installation confirmed!');
+          scriptInstalled = true;
+          checkingScript = false;
+
+          // CRITICAL: Clear the timeout!
+          if (testWindow._checkTimeoutId) {
+            clearTimeout(testWindow._checkTimeoutId);
+            testWindow._checkTimeoutId = null;
+          }
+
+          // Close test window after a short delay
+          setTimeout(() => {
+            if (testWindow && !testWindow.closed) {
+              testWindow.close();
+            }
+            testWindow = null;
+          }, 500);
+          return;
+        }
+
+        // Otherwise, this is from the main Reddit window
+        redditReady = true;
+
+        // Flush any queued messages
+        if (messageQueue.length > 0) {
+          console.log('🔄 Flushing message queue:', messageQueue.length, 'messages');
+          messageQueue.forEach(msg => {
+            if (redditWindow && !redditWindow.closed) {
+              redditWindow.postMessage(msg, '*');
+            }
+          });
+          messageQueue = [];
+        }
+      }
+    });
+
+    // Track mouse movement
+    document.addEventListener('mousemove', () => {
+      lastMouseTime = Date.now();
+    });
+
+    // Add window polling to detect closed Reddit window
+    const windowCheckInterval = setInterval(() => {
+      if (redditWindow && redditWindow.closed) {
+        console.log('🪟 Reddit window was closed');
+        redditWindow = null;
+        redditReady = false;
+        isScrolling = false;
+        if (scrollInterval) {
+          clearInterval(scrollInterval);
+          scrollInterval = null;
+        }
+      }
+    }, 1000);
+
+    return () => {
+      if (scrollInterval) {
+        clearInterval(scrollInterval);
+      }
+      if (windowCheckInterval) {
+        clearInterval(windowCheckInterval);
+      }
+      if (testWindow && !testWindow.closed) {
+        testWindow.close();
+      }
+    };
+  });
+
+  // Check if Tampermonkey script is installed
+  function checkScriptInstalled() {
+    if (checkingScript) return;
+
+    console.log('🔍 Checking if Tampermonkey script is installed...');
+    console.log('⏳ Opening Reddit and waiting for script to send READY signal...');
+    checkingScript = true;
+    scriptInstalled = false;
+
+    // Open with normal size so user can see what's happening
+    testWindow = window.open(
+      'https://old.reddit.com/',
+      'scriptTestWindow',
+      'width=800,height=600'
+    );
+
+    if (!testWindow) {
+      console.log('❌ Could not open test window (popups blocked?)');
+      error = 'Popups are blocked. Please allow popups and try again.';
+      checkingScript = false;
+      scriptInstalled = false;
+      return;
+    }
+
+    console.log('🪟 Test window opened. Waiting for script to respond...');
+    statusMessage = 'Testing Tampermonkey script... (watch the opened window\'s console)';
+
+    // Set timeout - if we don't get READY signal in time, script isn't installed
+    const timeoutId = setTimeout(() => {
+      if (checkingScript && testWindow && !testWindow.closed) {
+        console.log('⏱️ Script check timeout - script may not be installed');
+        console.log('💡 Try opening old.reddit.com manually and checking the console for error messages');
+        checkingScript = false;
+        scriptInstalled = false;
+        statusMessage = '';
+        error = 'Script check timeout. Open the test window\'s console (F12) to see errors. Script may not be installed correctly.';
+        testWindow.close();
+        testWindow = null;
+      }
+    }, SCRIPT_CHECK_TIMEOUT);
+
+    // Store timeout ID for cleanup
+    testWindow._checkTimeoutId = timeoutId;
+  }
+
+  // Manually install the script
+  function installScript() {
+    const scriptUrl = `${window.location.origin}/reddit-autoscroll.user.js`;
+    console.log('🔗 Opening userscript URL for installation:', scriptUrl);
+    statusMessage = 'Opening Tampermonkey installer... Please click "Install" when prompted';
+    error = '';
+
+    window.open(scriptUrl, 'scriptInstaller', 'width=1200,height=800');
+
+    // Auto-check after a longer delay to give time for installation
+    // User should have completed the install in Tampermonkey by then
+    setTimeout(() => {
+      console.log('⏳ Auto-checking script installation...');
+      checkScriptInstalled();
+    }, 6000);
+  }
+
+  // Retry script check
+  function retryScriptCheck() {
+    checkScriptInstalled();
+  }
+
+  // Send message to Reddit window
   function sendMessageToReddit(command) {
     if (!redditWindow || redditWindow.closed) {
       console.log('❌ Reddit window not open');
       return false;
+    }
+
+    // If Reddit isn't ready yet, queue the message
+    if (!redditReady) {
+      console.log('⏳ Reddit not ready, queueing message:', command.type);
+      messageQueue.push(command);
+      return true;
     }
 
     try {
@@ -29,126 +198,134 @@
     }
   }
 
-  // Start auto-scroll
-  function startScrolling() {
-    if (isScrolling) return;
-    isScrolling = true;
-
-    // Send start command to Reddit window
-    const sent = sendMessageToReddit({ type: 'SCROLLER_START', scrollSpeed });
-
-    if (!sent) {
-      isScrolling = false;
+  // Open Reddit in a new window
+  function openReddit() {
+    if (redditWindow && !redditWindow.closed) {
+      console.log('🪟 Reddit window already open, focusing...');
+      redditWindow.focus();
       return;
     }
 
+    console.log('🪟 Opening Reddit in new window...');
+    redditReady = false;
+    messageQueue = [];
+
+    redditWindow = window.open(
+      'https://old.reddit.com/',
+      'redditWindow',
+      'width=1200,height=800'
+    );
+
+    if (!redditWindow) {
+      error = 'Failed to open Reddit. Check if popups are blocked.';
+      return;
+    }
+
+    statusMessage = '⏳ Waiting for Reddit to load...';
+    error = '';
+  }
+
+  // Start scrolling
+  function startScrolling() {
+    if (!redditWindow || redditWindow.closed) {
+      error = 'Reddit window is not open';
+      return;
+    }
+
+    if (!redditReady) {
+      error = 'Reddit is not ready yet. Please wait...';
+      return;
+    }
+
+    if (isScrolling) {
+      return;
+    }
+
+    console.log('▶️ Starting scroll with speed:', scrollSpeed);
+    isScrolling = true;
+    error = '';
+    statusMessage = '✅ Scrolling started!';
+
+    sendMessageToReddit({
+      type: 'SCROLLER_START',
+      scrollSpeed
+    });
+
+    // Polling: continuously ensure Reddit knows we want to scroll
     scrollInterval = setInterval(() => {
-      // Only scroll if window is still open
-      if (redditWindow && !redditWindow.closed) {
-        // Check if mouse has been inactive for long enough
+      if (isScrolling && redditWindow && !redditWindow.closed) {
         const timeSinceLastMouse = Date.now() - lastMouseTime;
 
         if (timeSinceLastMouse > inactivityDelay) {
-          // Focus the Reddit window
+          // Only focus if there's been inactivity
           redditWindow.focus();
         }
+
+        // Keep sending ENSURE_ACTIVE to handle timing issues
+        sendMessageToReddit({
+          type: 'SCROLLER_ENSURE_ACTIVE',
+          scrollSpeed
+        });
       }
     }, SCROLL_INTERVAL);
   }
 
-  // Stop auto-scroll
+  // Stop scrolling
   function stopScrolling() {
+    if (!isScrolling) {
+      return;
+    }
+
+    console.log('⏹️ Stopping scroll');
     isScrolling = false;
+    error = '';
+    statusMessage = '✅ Scrolling stopped!';
+
     if (scrollInterval) {
       clearInterval(scrollInterval);
       scrollInterval = null;
     }
 
-    // Send stop command to Reddit window
-    sendMessageToReddit({ type: 'SCROLLER_STOP' });
+    sendMessageToReddit({
+      type: 'SCROLLER_STOP'
+    });
   }
 
-  // Handle mouse activity in the Reddit window
-  function handleMouseActivity() {
-    lastMouseTime = Date.now();
-    mouseInactive = false;
+  // Update scroll speed
+  function updateSpeed() {
+    if (isScrolling) {
+      console.log('📏 Updating scroll speed:', scrollSpeed);
+      statusMessage = `📏 Speed: ${scrollSpeed}px`;
 
-    // Reset the inactivity timer
-    if (mouseInactiveTimer) {
-      clearTimeout(mouseInactiveTimer);
+      sendMessageToReddit({
+        type: 'SCROLLER_UPDATE_SPEED',
+        scrollSpeed
+      });
     }
-
-    // Start counting inactivity again
-    mouseInactiveTimer = setTimeout(() => {
-      mouseInactive = true;
-    }, inactivityDelay);
-  }
-
-  // Open Reddit
-  function openReddit() {
-    // Check if window already open
-    if (redditWindow && !redditWindow.closed) {
-      redditWindow.focus();
-      return;
-    }
-
-    // Open Reddit with old.reddit.com to match RES
-    redditWindow = window.open('https://old.reddit.com/', 'redditWindow', 'width=1200,height=800');
-
-    if (redditWindow) {
-      // Add event listeners to the Reddit window
-      try {
-        redditWindow.addEventListener('mousemove', handleMouseActivity);
-        redditWindow.addEventListener('mousedown', handleMouseActivity);
-        redditWindow.addEventListener('wheel', handleMouseActivity);
-        redditWindow.addEventListener('keydown', handleMouseActivity);
-      } catch (e) {
-        // Cross-origin restriction - use polling instead
-        console.log('Cross-origin window detected, using polling for activity');
-        startMouseActivityPolling();
-      }
-    }
-  }
-
-  // Fallback: Poll for activity since we can't directly listen to cross-origin windows
-  function startMouseActivityPolling() {
-    setInterval(() => {
-      // Reset activity timer periodically - user will reset when they interact
-      handleMouseActivity();
-    }, 100);
   }
 
   // Close Reddit window
   function closeReddit() {
     if (redditWindow && !redditWindow.closed) {
+      console.log('❌ Closing Reddit window...');
       redditWindow.close();
-      redditWindow = null;
     }
-    stopScrolling();
+
+    redditWindow = null;
+    redditReady = false;
+    isScrolling = false;
+    error = '';
+    statusMessage = '✅ Reddit closed!';
+
+    if (scrollInterval) {
+      clearInterval(scrollInterval);
+      scrollInterval = null;
+    }
   }
 
-  // Update scroll speed when changed
+  // Watch scroll speed changes
   $: if (isScrolling) {
-    sendMessageToReddit({ type: 'SCROLLER_UPDATE_SPEED', scrollSpeed });
-  }
-
-  onMount(() => {
-    // Initialize
-    handleMouseActivity();
-
-    return () => {
-      // Cleanup
-      if (scrollInterval) clearInterval(scrollInterval);
-      if (mouseInactiveTimer) clearTimeout(mouseInactiveTimer);
-      closeReddit();
-    };
-  });
-
-  // Track mouse activity on the control panel itself
-  function onControlPanelMouseMove() {
-    if (redditWindow && !redditWindow.closed) {
-      handleMouseActivity();
-    }
+    updateSpeed();
   }
 </script>
 
@@ -159,26 +336,38 @@
     <div class="info-box">
       <p>👉 <strong>Instructions:</strong></p>
       <ul>
-        <li>Click "Open Reddit" to log in and view Reddit</li>
-        <li>You'll be using old.reddit.com (with Reddit Enhancement Suite)</li>
-        <li>Click "Start Scrolling" to enable auto-scroll</li>
-        <li>Move your mouse on Reddit to pause scrolling</li>
-        <li>After 5 seconds of no mouse activity, auto-scroll resumes</li>
-        <li>You can still click, copy links, and interact normally</li>
+        <li><strong>First time:</strong> Install Tampermonkey extension, then click "Install Now" below</li>
+        <li>Click "Open Reddit" to open Reddit in YOUR browser</li>
+        <li>Wait for script to load (watch the "Tampermonkey Script" status)</li>
+        <li>When "Reddit Ready" shows ✅, click "Start Scrolling"</li>
+        <li>Adjust scroll speed anytime with the slider</li>
+        <li>Click "Stop Scrolling" to pause, or "Close Reddit" to exit</li>
       </ul>
     </div>
 
     <div class="status-panel">
       <div class="status-row">
+        <span class="label">Tampermonkey Script:</span>
+        <span class="status" class:active={scriptInstalled}>
+          {scriptInstalled ? '✅ INSTALLED' : '❌ NOT INSTALLED'}
+        </span>
+      </div>
+      {#if !scriptInstalled}
+        {#if !checkingScript}
+          <div class="status-row">
+            <button on:click={installScript} class="status-action">Install Now</button>
+            <button on:click={retryScriptCheck} class="status-action">Check Again</button>
+          </div>
+        {:else}
+          <div class="status-row">
+            <span class="status-message">🔍 Checking script installation (this may take a few seconds)...</span>
+          </div>
+        {/if}
+      {/if}
+      <div class="status-row">
         <span class="label">Scrolling Status:</span>
         <span class="status" class:active={isScrolling}>
           {isScrolling ? '✅ ACTIVE' : '⏸️ INACTIVE'}
-        </span>
-      </div>
-      <div class="status-row">
-        <span class="label">Mouse Status:</span>
-        <span class="status" class:active={!mouseInactive}>
-          {mouseInactive ? '⏱️ INACTIVE (5s+)' : '🖱️ ACTIVE'}
         </span>
       </div>
       <div class="status-row">
@@ -187,11 +376,30 @@
           {redditWindow && !redditWindow.closed ? '🪟 OPEN' : '❌ CLOSED'}
         </span>
       </div>
+      <div class="status-row">
+        <span class="label">Reddit Ready:</span>
+        <span class="status" class:active={redditReady}>
+          {redditReady ? '✅ READY' : '⏳ LOADING...'}
+        </span>
+      </div>
+      {#if statusMessage}
+        <div class="status-row">
+          <span class="label">Status:</span>
+          <span class="status-message">{statusMessage}</span>
+        </div>
+      {/if}
+      {#if error}
+        <div class="status-row error">
+          <span class="label">Error:</span>
+          <span class="error-message">{error}</span>
+        </div>
+      {/if}
     </div>
 
     <div class="controls">
       <button
         on:click={openReddit}
+        disabled={redditWindow && !redditWindow.closed}
         class="btn btn-primary"
       >
         🪟 Open Reddit
@@ -199,10 +407,11 @@
 
       <button
         on:click={startScrolling}
-        disabled={!redditWindow || redditWindow.closed || isScrolling}
+        disabled={!redditWindow || redditWindow.closed || isScrolling || !redditReady}
         class="btn btn-success"
+        title={!redditReady ? 'Waiting for Reddit to load...' : ''}
       >
-        ▶️ Start Scrolling
+        {!redditReady && redditWindow && !redditWindow.closed ? '⏳ Waiting...' : '▶️ Start Scrolling'}
       </button>
 
       <button
@@ -210,7 +419,7 @@
         disabled={!isScrolling}
         class="btn btn-warning"
       >
-        ⏸️ Stop Scrolling
+        ⏹️ Stop Scrolling
       </button>
 
       <button
@@ -233,7 +442,7 @@
           min="1"
           max="20"
           bind:value={scrollSpeed}
-          on:mousemove={onControlPanelMouseMove}
+          disabled={!isScrolling}
         />
         <small>Pixels to scroll per check</small>
       </div>
@@ -249,15 +458,16 @@
           max="15000"
           step="1000"
           bind:value={inactivityDelay}
-          on:mousemove={onControlPanelMouseMove}
+          disabled={isScrolling}
         />
         <small>Time before auto-scroll resumes after mouse movement</small>
       </div>
     </div>
 
     <div class="footer">
-      <p>🔗 Visit <a href="https://old.reddit.com/" target="_blank">old.reddit.com</a> directly if popup blocker prevents opening</p>
-      <p>💡 <strong>Tips:</strong> Use Reddit Enhancement Suite for the old Reddit look</p>
+      <p>🌐 <strong>How it works:</strong> Control panel opens Reddit in your browser</p>
+      <p>🤖 <strong>Tampermonkey script:</strong> Automatically scrolls via postMessage</p>
+      <p>💡 <strong>No backend:</strong> Everything runs client-side in your browser</p>
     </div>
   </div>
 </div>
@@ -340,6 +550,13 @@
     border-bottom: none;
   }
 
+  .status-row.error {
+    background: #ffe0e0;
+    padding: 10px;
+    border-radius: 4px;
+    border: none;
+  }
+
   .label {
     font-weight: 600;
     color: #555;
@@ -357,6 +574,44 @@
   .status.active {
     background: #d4edda;
     color: #155724;
+  }
+
+  .status-message {
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #d4edda;
+    color: #155724;
+  }
+
+  .status-action {
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    background: #17a2b8;
+    color: white;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-right: 8px;
+  }
+
+  .status-action:hover {
+    background: #138496;
+    transform: translateY(-1px);
+  }
+
+  .status-action:active {
+    transform: translateY(0);
+  }
+
+  .error-message {
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #ffdddd;
+    color: #cc0000;
   }
 
   .controls {
@@ -460,6 +715,11 @@
     -webkit-appearance: none;
   }
 
+  .setting-group input[type="range"]:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .setting-group input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
@@ -509,16 +769,6 @@
     font-size: 13px;
     color: #666;
     line-height: 1.6;
-  }
-
-  .footer a {
-    color: #667eea;
-    text-decoration: none;
-    font-weight: 600;
-  }
-
-  .footer a:hover {
-    text-decoration: underline;
   }
 
   @media (max-width: 600px) {

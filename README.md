@@ -1,43 +1,58 @@
-# Svelte + Vite
+# Reddit Auto-Scroller
 
-This template should help get you started developing with Svelte in Vite.
+Control Reddit scrolling from a web dashboard using Tampermonkey.
 
-## Recommended IDE Setup
+## Architecture
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+- **Frontend**: Svelte + Vite on port 5177
+- **Control**: Uses window.open() + postMessage
+- **Userscript**: Tampermonkey script runs on Reddit
+- **No backend**: Everything runs client-side in your browser
 
-## Need an official Svelte framework?
+## Setup
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+1. Install Tampermonkey extension in your browser
+2. Run: `npm install && npm run dev`
+3. Open http://localhost:5177 (or http://192.168.1.51:5177 from network)
+4. Click "Install Now" to install userscript
+5. Click "Open Reddit" to open Reddit
+6. Click "Start Scrolling" when "Reddit Ready" shows ✅
 
-## Technical considerations
+## How It Works
 
-**Why use this over SvelteKit?**
+1. Control panel opens Reddit via window.open()
+2. Tampermonkey script loads on Reddit page
+3. Script sends READY signal to control panel
+4. Control panel sends scroll commands via postMessage
+5. Reddit scrolls automatically at ~60px/second (adjustable)
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
+## Features
 
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
+- **Smooth scrolling**: ~60px/second at default speed (1000x faster than original)
+- **Adjustable speed**: Control scroll rate with slider (1-20px)
+- **Inactivity delay**: Auto-resume scrolling after mouse movement
+- **Network access**: Works from any machine on network
+- **No backend**: No server or database needed
 
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
+## Troubleshooting
 
-**Why include `.vscode/extensions.json`?**
+See USERSCRIPT_SETUP.md for detailed troubleshooting.
 
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
+### Script Not Installing?
 
-**Why enable `checkJs` in the JS template?**
+1. Open https://old.reddit.com directly
+2. Check browser console (F12) for errors
+3. Ensure Tampermonkey is installed and enabled
+4. Try manually installing via "Install Now" button
 
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
+### Scrolling Not Working?
 
-**Why is HMR not preserving my local component state?**
+1. Verify script is installed: "Tampermonkey Script: ✅ INSTALLED"
+2. Click "Open Reddit"
+3. Wait for "Reddit Ready: ✅ READY"
+4. Click "Start Scrolling"
+5. Check Reddit console for error messages
 
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
+### Still Having Issues?
 
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
-```
+Check the browser console (F12) for error messages and share them when asking for help.
