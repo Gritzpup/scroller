@@ -156,7 +156,6 @@ app.all('/*', async (req, res) => {
         /<head[^>]*>/i,
         `<head>
   <meta name="referrer" content="no-referrer">
-  <base href="https://old.reddit.com/">
   <script>
     window.__proxyIntercept = true;
 
