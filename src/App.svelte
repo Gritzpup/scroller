@@ -69,6 +69,22 @@
   function updateSpeed() {
     // Speed updates in real-time while scrolling
   }
+
+  function loginToReddit() {
+    console.log('🔐 Login button clicked');
+    console.log('  proxyUrl:', proxyUrl);
+    console.log('  iframeElement:', iframeElement);
+
+    // Get fresh reference to iframe
+    const frame = document.querySelector('iframe');
+    if (frame) {
+      console.log('✅ Found iframe, reloading for login...');
+      // Hard refresh with cache-busting
+      frame.src = proxyUrl + '?t=' + Date.now();
+    } else {
+      console.error('❌ Iframe element not found');
+    }
+  }
 </script>
 
 <div class="container">
@@ -98,6 +114,12 @@
     {#if showControls}
       <div class="control-panel">
         <h3>Auto-Scroll</h3>
+
+        <div class="controls">
+          <button class="btn btn-login" on:click={loginToReddit}>
+            🔐 Login
+          </button>
+        </div>
 
         <div class="controls">
           {#if !isScrolling}
@@ -289,6 +311,17 @@
 
   .btn-stop:hover {
     background: #c82333;
+    transform: translateY(-1px);
+  }
+
+  .btn-login {
+    background: #0079d3;
+    color: white;
+    width: 100%;
+  }
+
+  .btn-login:hover {
+    background: #005fa3;
     transform: translateY(-1px);
   }
 
