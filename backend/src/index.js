@@ -111,6 +111,27 @@ app.all('/*', async (req, res) => {
         `<head>
   <meta name="referrer" content="no-referrer">
   <base href="https://old.reddit.com/">
+  <script>
+    (function() {
+      // Intercept fetch requests to route reddit URLs through proxy
+      const originalFetch = window.fetch;
+      window.fetch = function(resource, config) {
+        if (typeof resource === 'string' && resource.includes('old.reddit.com')) {
+          resource = resource.replace('https://old.reddit.com', '');
+        }
+        return originalFetch.call(this, resource, config);
+      };
+
+      // Intercept XMLHttpRequest to route reddit URLs through proxy
+      const originalXHR = window.XMLHttpRequest.prototype.open;
+      window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        if (typeof url === 'string' && url.includes('old.reddit.com')) {
+          url = url.replace('https://old.reddit.com', '');
+        }
+        return originalXHR.call(this, method, url, ...rest);
+      };
+    })();
+  </script>
 `
       );
 
