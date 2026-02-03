@@ -143,6 +143,14 @@ app.all('/*', async (req, res) => {
       // Remove CSP headers that block framing
       html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
 
+      // Rewrite all resource URLs to use proxy
+      // This ensures ALL requests (scripts, images, etc.) go through the proxy
+      html = html.replace(/https:\/\/old\.reddit\.com/g, '');
+      html = html.replace(/https:\/\/reddit\.com/g, '');
+      html = html.replace(/https:\/\/www\.reddit\.com/g, '');
+      html = html.replace(/https:\/\/www\.redditstatic\.com/g, '/proxy-static');
+      html = html.replace(/https:\/\/redditstatic\.com/g, '/proxy-static');
+
       // Inject early interception script before any other scripts run
       html = html.replace(
         /<head[^>]*>/i,
