@@ -15,6 +15,17 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'scroller-proxy' });
 });
 
+// Handle CORS preflight requests
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-modhash, X-Modhash, X-CSRF-Token, Accept, Accept-Language, Content-Language, Cache-Control, User-Agent, Cookie');
+  res.setHeader('Access-Control-Expose-Headers', 'Set-Cookie, x-modhash, X-Modhash');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Content-Length', '0');
+  res.sendStatus(204);
+});
+
 // Get or create session cookies
 function getSessionCookies(sessionId) {
   if (!sessionCookies.has(sessionId)) {
@@ -78,10 +89,11 @@ app.all('/*', async (req, res) => {
 
     const contentType = response.headers.get('content-type');
 
-    // Set CORS and framing headers
+    // Set CORS and framing headers - allow Reddit auth headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-modhash, X-Modhash, X-CSRF-Token, Accept, Accept-Language, Content-Language, Cache-Control, User-Agent, Cookie');
+    res.setHeader('Access-Control-Expose-Headers', 'Set-Cookie, x-modhash, X-Modhash');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.removeHeader('X-Frame-Options');
     res.removeHeader('Content-Security-Policy');
