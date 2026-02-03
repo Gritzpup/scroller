@@ -89,6 +89,20 @@ app.all('/*', async (req, res) => {
 
     const contentType = response.headers.get('content-type');
 
+    // Rewrite Set-Cookie headers to work with proxy domain
+    const setCookieHeader = response.headers.get('set-cookie');
+    const setCookieHeaders = [];
+    if (setCookieHeader) {
+      const cookieStrings = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+      cookieStrings.forEach(cookieStr => {
+        // Remove Domain directive so browser treats it as a host-only cookie for localhost:5178
+        // Also remove SameSite=None requirement since we're not cross-site
+        cookieStr = cookieStr.replace(/;\s*Domain=[^;]*/gi, '');
+        cookieStr = cookieStr.replace(/;\s*SameSite=None/gi, '');
+        setCookieHeaders.push(cookieStr);
+      });
+    }
+
     // Set CORS and framing headers - allow Reddit auth headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
@@ -98,6 +112,11 @@ app.all('/*', async (req, res) => {
     res.removeHeader('X-Frame-Options');
     res.removeHeader('Content-Security-Policy');
     res.removeHeader('Content-Security-Policy-Report-Only');
+
+    // Set the rewritten cookies
+    if (setCookieHeaders.length > 0) {
+      res.setHeader('Set-Cookie', setCookieHeaders);
+    }
 
     if (contentType && contentType.includes('text/html')) {
       let html = await response.text();
