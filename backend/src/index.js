@@ -105,32 +105,43 @@ app.all('/*', async (req, res) => {
       // Remove CSP headers that block framing
       html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
 
-      // Add meta tags to allow framing and fix origin issues
+      // Inject early interception script before any other scripts run
       html = html.replace(
-        '<head>',
+        /<head[^>]*>/i,
         `<head>
   <meta name="referrer" content="no-referrer">
   <base href="https://old.reddit.com/">
   <script>
-    (function() {
-      // Intercept fetch requests to route reddit URLs through proxy
-      const originalFetch = window.fetch;
-      window.fetch = function(resource, config) {
-        if (typeof resource === 'string' && resource.includes('old.reddit.com')) {
-          resource = resource.replace('https://old.reddit.com', '');
+    window.__proxyIntercept = true;
+
+    // Override XMLHttpRequest before any other code runs
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+      const xhr = new OriginalXHR();
+      const originalOpen = xhr.open;
+
+      xhr.open = function(method, url, ...args) {
+        // Route old.reddit.com URLs through proxy
+        if (typeof url === 'string') {
+          url = url.replace(/^https:\/\/old\.reddit\.com/g, '');
+          if (!url.startsWith('/')) url = '/' + url;
         }
-        return originalFetch.call(this, resource, config);
+        return originalOpen.apply(this, [method, url, ...args]);
       };
 
-      // Intercept XMLHttpRequest to route reddit URLs through proxy
-      const originalXHR = window.XMLHttpRequest.prototype.open;
-      window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        if (typeof url === 'string' && url.includes('old.reddit.com')) {
-          url = url.replace('https://old.reddit.com', '');
-        }
-        return originalXHR.call(this, method, url, ...rest);
-      };
-    })();
+      return xhr;
+    };
+    window.XMLHttpRequest.prototype = OriginalXHR.prototype;
+
+    // Override fetch before any other code runs
+    const originalFetch = window.fetch;
+    window.fetch = function(resource, config) {
+      if (typeof resource === 'string') {
+        resource = resource.replace(/^https:\/\/old\.reddit\.com/g, '');
+        if (!resource.startsWith('/')) resource = '/' + resource;
+      }
+      return originalFetch.apply(this, [resource, config]);
+    };
   </script>
 `
       );
