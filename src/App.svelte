@@ -16,9 +16,6 @@
 
     console.log('📡 Proxy URL:', proxyUrl);
 
-    // Get the iframe element
-    const frame = document.querySelector('iframe');
-    iframeElement = frame;
   });
 
   onDestroy(() => {
@@ -99,6 +96,7 @@
   <!-- Full-screen Reddit iframe (via proxy to bypass X-Frame-Options) -->
   {#if proxyUrl}
     <iframe
+      bind:this={iframeElement}
       title="Reddit"
       src={proxyUrl}
       class="reddit-frame"
