@@ -238,8 +238,8 @@
     height: 60px;
     border-radius: 50%;
     border: none;
-    background: white;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    background: #272729;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     cursor: pointer;
     font-size: 28px;
     display: flex;
@@ -251,7 +251,7 @@
 
   .cog-button:hover {
     transform: scale(1.1);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
   }
 
   .cog-button:active {
@@ -262,9 +262,10 @@
     position: absolute;
     bottom: 80px;
     right: 0;
-    background: white;
+    background: #1a1a1b;
+    border: 1px solid #343536;
     border-radius: 12px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     padding: 20px;
     width: 240px;
     animation: slideUp 0.2s ease;
@@ -284,7 +285,7 @@
   .control-panel h3 {
     margin: 0 0 15px 0;
     font-size: 16px;
-    color: #333;
+    color: #d7dadc;
   }
 
   .controls {
@@ -347,14 +348,14 @@
   .settings {
     margin-bottom: 15px;
     padding-bottom: 15px;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid #343536;
   }
 
   .settings label {
     display: block;
     font-size: 13px;
     font-weight: 600;
-    color: #333;
+    color: #d7dadc;
     margin-bottom: 8px;
   }
 
@@ -362,7 +363,7 @@
     width: 100%;
     height: 4px;
     border-radius: 2px;
-    background: #ddd;
+    background: #343536;
     outline: none;
     -webkit-appearance: none;
     cursor: pointer;
@@ -389,7 +390,7 @@
 
   .settings small {
     display: block;
-    color: #999;
+    color: #818384;
     font-size: 11px;
     margin-top: 4px;
   }
@@ -405,6 +406,6 @@
   }
 
   .status-inactive {
-    color: #999;
+    color: #818384;
   }
 </style>

@@ -3,13 +3,41 @@ import { createServer as createViteServer } from 'vite'
 import fetch from 'node-fetch'
 import crypto from 'crypto'
 import { execSync } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const COOKIE_FILE = join(__dirname, '.session-cookies.json')
 
 const app = express()
 const PORT = 5177
 
 const sessionCookies = new Map()
+
+// Load persisted cookies on startup
+try {
+  if (existsSync(COOKIE_FILE)) {
+    const data = JSON.parse(readFileSync(COOKIE_FILE, 'utf-8'))
+    for (const [key, value] of Object.entries(data)) {
+      sessionCookies.set(key, value)
+    }
+    const count = sessionCookies.get('default')?.length || 0
+    console.log(`🍪 Loaded ${count} persisted cookies from disk`)
+  }
+} catch (e) {
+  console.log(`⚠️ Could not load saved cookies: ${e.message}`)
+}
+
+function saveCookies() {
+  try {
+    const obj = Object.fromEntries(sessionCookies)
+    writeFileSync(COOKIE_FILE, JSON.stringify(obj, null, 2))
+  } catch (e) {
+    console.error(`⚠️ Could not save cookies: ${e.message}`)
+  }
+}
 
 function getSessionCookies(sessionId) {
   if (!sessionCookies.has(sessionId)) {
@@ -215,6 +243,7 @@ app.all('/popup/*', async (req, res) => {
         }
       })
       console.log(`🍪 Captured ${setCookieHeaders.length} cookies from login`)
+      saveCookies()
     }
 
     // Set basic CORS
@@ -320,6 +349,7 @@ app.get('/auth/login', async (req, res) => {
     if (username) {
       console.log(`✅ Reddit session verified for user: ${username}`)
       console.log(`🍪 Total stored cookies: ${cookies.length}`)
+      saveCookies()
       res.json({ ok: true, username })
     } else {
       console.log(`⚠️ Cookie extracted but did not authenticate. Response: ${meData.substring(0, 200)}`)
@@ -409,6 +439,7 @@ app.all('/api/*', async (req, res) => {
       })
 
       console.log(`🍪 Captured ${setCookieHeaders.length} cookies for session: ${sessionId}`)
+      saveCookies()
     }
 
     // Set CORS headers
@@ -498,7 +529,255 @@ app.all('/api/*', async (req, res) => {
   }
 </script>`
 
-      html = html.replace(/<head[^>]*>/i, `<head>${injectScript}`)
+      const nightModeCSS = `<style id="scroller-nightmode">
+  /* Base */
+  html, body, body > .content, #siteTable, .listing-page, .comments-page,
+  .search-page, .wiki-page, .other-discussions, .organic-listing {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+
+  /* Header */
+  #header, #header-bottom-left {
+    background-color: #1a1a1b !important;
+    border-bottom: 1px solid #343536 !important;
+  }
+  #header-img, #header-img-a img {
+    filter: invert(1) hue-rotate(180deg) brightness(1.2) !important;
+  }
+  #header .pagename a, #header-bottom-left a {
+    color: #d7dadc !important;
+  }
+  .tabmenu li a {
+    background-color: #272729 !important;
+    color: #818384 !important;
+    border-color: #343536 !important;
+  }
+  .tabmenu li.selected a {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+    border-bottom-color: #1a1a1b !important;
+  }
+  .tabmenu li a:hover { background-color: #343536 !important; color: #d7dadc !important; }
+  #header-bottom-right { color: #818384 !important; }
+  #header-bottom-right a { color: #4fbcff !important; }
+  #sr-header-area, #sr-more-link {
+    background-color: #272729 !important;
+    color: #818384 !important;
+    border-color: #343536 !important;
+  }
+  #sr-header-area a { color: #d7dadc !important; }
+  .sr-bar a { color: #818384 !important; }
+  .separator { color: #343536 !important; }
+  #searchexpander, .search-expander { background-color: #272729 !important; }
+  #search input[type="text"], #searchexpander input {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+
+  /* Sidebar */
+  .side, .sidebox, .spacer .titlebox, .linkinfo,
+  .side .md, .side .spacer {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .morelink { background-color: #272729 !important; border-color: #343536 !important; }
+  .morelink a { color: #d7dadc !important; }
+  .morelink .nub { background-color: #272729 !important; }
+  .sidebox .spacer, .account-activity-box,
+  .premium-banner, .premium-banner *,
+  .create-your-own, .goldvertisement {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .goldvertisement a, .premium-banner a { color: #4fbcff !important; }
+  .sidecontentbox, .sidecontentbox .content {
+    background-color: #1a1a1b !important;
+    border-color: #343536 !important;
+  }
+  .sidecontentbox .title h2 {
+    color: #d7dadc !important;
+  }
+  .titlebox .bottom {
+    border-color: #343536 !important;
+  }
+  .subscribe-button .add, .subscribe-button .remove {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .leavemoderator, .leavecontributor { background-color: #272729 !important; }
+
+  /* Posts / Things */
+  .thing, .link, .comment, .nestedlisting, .panestack-title {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  .link .entry, .comment .entry {
+    background-color: transparent !important;
+  }
+  .link .title a, .link .title a:visited {
+    color: #d7dadc !important;
+  }
+  .link .title a:hover {
+    color: #4fbcff !important;
+  }
+  a { color: #4fbcff !important; }
+  a:visited { color: #9b8dff !important; }
+  .md, .md p, .md li, .md h1, .md h2, .md h3, .usertext-body {
+    color: #d7dadc !important;
+  }
+  .md blockquote {
+    border-left-color: #4fbcff !important;
+    color: #818384 !important;
+  }
+  .md code, .md pre {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .comment .author { color: #4fbcff !important; }
+  .tagline, .tagline a, .search-result-meta {
+    color: #818384 !important;
+  }
+
+  /* Votes */
+  .arrow.up:hover, .arrow.upmod { color: #ff4500 !important; }
+  .arrow.down:hover, .arrow.downmod { color: #7193ff !important; }
+  .rank { color: #818384 !important; }
+  .score, .score.likes, .score.dislikes, .score.unvoted { color: #818384 !important; }
+
+  /* Footer */
+  .footer, .footer-parent, .bottommenu, .debuginfo {
+    background-color: #1a1a1b !important;
+    color: #818384 !important;
+    border-color: #343536 !important;
+  }
+
+  /* Forms & inputs */
+  .infobar, .roundfield, .login-form-side {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  input, textarea, select {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .btn, button {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+
+  /* Menu / dropdowns */
+  .menuarea, .dropdown.lightdrop .selected, .drop-choices {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .drop-choices a { color: #d7dadc !important; }
+  .drop-choices a:hover { background-color: #343536 !important; }
+
+  /* Misc */
+  hr, .thing .child { border-color: #343536 !important; }
+  .clearleft + .clearleft { border-color: #343536 !important; }
+  .expando { background-color: #272729 !important; border-color: #343536 !important; }
+  .selftext, .usertext-edit { background-color: #272729 !important; }
+  .nav-buttons, .nextprev a { color: #4fbcff !important; }
+  .flair, .linkflairlabel {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .thumbnail { opacity: 0.9; }
+  .thing .flat-list li a { color: #818384 !important; }
+  .thing .flat-list li a:hover { color: #d7dadc !important; }
+  .organic-listing { border-color: #343536 !important; }
+  .listing-chooser-collapsed, .listing-chooser,
+  .listing-chooser *, .listing-chooser .grippy {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .listing-chooser li { border-color: #343536 !important; background-color: #272729 !important; }
+  .listing-chooser li:hover { background-color: #343536 !important; }
+  .listing-chooser li a { color: #d7dadc !important; }
+  .listing-chooser li.selected { background-color: #1a1a1b !important; }
+  .listing-chooser .grippy {
+    background-color: #343536 !important;
+    border-color: #343536 !important;
+  }
+  .listing-chooser .grippy:hover { background-color: #4a4a4c !important; }
+  .listing-chooser .grippy::after, .listing-chooser .grippy::before,
+  .listing-chooser-collapsed::after, .listing-chooser-collapsed::before {
+    border-color: transparent transparent transparent #818384 !important;
+  }
+  .listing-chooser-collapsed { background-color: #272729 !important; }
+  .listing-chooser .title { color: #818384 !important; }
+  .wiki-page .wiki-page-content { background-color: #1a1a1b !important; }
+  .res-nightmode .thing, .RES-keyNav-activeElement, .res-selected {
+    background-color: #272729 !important;
+    outline-color: #343536 !important;
+  }
+
+  /* User bar (top right: username, mail, prefs) */
+  #header-bottom-right, #header-bottom-right * {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  #header-bottom-right .user a { color: #4fbcff !important; }
+  #header-bottom-right .separator { color: #343536 !important; }
+  #mail, #modmail { filter: brightness(0.8) !important; }
+
+  /* Vote arrows area */
+  .midcol, .arrow { background-color: transparent !important; }
+  .thing .midcol { background-color: transparent !important; }
+
+  /* Reddit Premium / gold box */
+  .premium-banner, .premium-banner *,
+  .goldvertisement, .goldvertisement *,
+  .side .gold-accent, .side .gold-accent * {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .goldvertisement .inner, .premium-banner .inner { background-color: #272729 !important; }
+  .goldvertisement img, .premium-banner img { filter: brightness(0.9) !important; }
+
+  /* Create your own subreddit / bottom sidebar boxes */
+  .side .spacer, .side .spacer * {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  .side .spacer .sidebox, .side .spacer .sidebox * {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  .sidebox .nub { background-color: #272729 !important; }
+
+  /* Catch-all: any remaining white backgrounds in the side */
+  .side div[style*="background"], .side .content {
+    background-color: #272729 !important;
+  }
+
+  /* Reddit snoo footer icon */
+  .footer .bottommenu img, #footer img { filter: invert(1) brightness(0.8) !important; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 12px; }
+  ::-webkit-scrollbar-track { background: #1a1a1b; }
+  ::-webkit-scrollbar-thumb { background: #343536; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #4a4a4c; }
+</style>`
+
+      html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}`)
       res.send(html)
     } else {
       res.send(buffer)
