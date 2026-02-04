@@ -530,6 +530,82 @@ app.all('/api/*', async (req, res) => {
 </script>
 <script>
 (function() {
+  var PROXY_PREFIX = '/api';
+  var REDDIT_BASE = 'https://www.reddit.com';
+  var REDDIT_PATH_RE = /^\\/(r\\/|u\\/|user\\/|comments\\/|message\\/|submit|wiki\\/|search|prefs\\/|over18|domain\\/|duplicates\\/|report|live\\/|gallery\\/|poll\\/)/;
+  var SKIP_RE = /^\\/(api\\/static\\/|api\\/tracking\\/|proxy-static\\/)/;
+  var nativeHrefDesc = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href');
+
+  function shouldFixLink(href) {
+    if (!href || href.startsWith('javascript:') || href === '#') return false;
+    var path = href;
+    if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX + '/')) {
+      path = path.substring(PROXY_PREFIX.length);
+    } else if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX)) {
+      path = path.substring(PROXY_PREFIX.length) || '/';
+    }
+    if (SKIP_RE.test(path)) return false;
+    if (path.startsWith('/') && REDDIT_PATH_RE.test(path)) return true;
+    if (path === '/' || path.startsWith('/?')) return true;
+    return false;
+  }
+
+  function getProxyPath(href) {
+    if (PROXY_PREFIX && href.startsWith(PROXY_PREFIX)) return href;
+    return PROXY_PREFIX + href;
+  }
+
+  function getRealUrl(href) {
+    var path = href;
+    if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX + '/')) {
+      path = path.substring(PROXY_PREFIX.length);
+    } else if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX)) {
+      path = path.substring(PROXY_PREFIX.length) || '/';
+    }
+    return REDDIT_BASE + path;
+  }
+
+  function fixLink(a) {
+    var href = a.getAttribute('href');
+    if (!href || a.hasAttribute('data-proxy-href')) return;
+    if (!shouldFixLink(href)) return;
+    var proxyPath = getProxyPath(href);
+    a.setAttribute('data-proxy-href', proxyPath);
+    nativeHrefDesc.set.call(a, getRealUrl(href));
+  }
+
+  function fixAllLinks(root) {
+    var links = (root || document).querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) fixLink(links[i]);
+  }
+
+  document.addEventListener('DOMContentLoaded', function() { fixAllLinks(); });
+
+  var observer = new (window.OriginalMutationObserver || MutationObserver)(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var added = mutations[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType === 1) {
+          if (node.tagName === 'A') fixLink(node);
+          if (node.querySelectorAll) fixAllLinks(node);
+        }
+      }
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest ? e.target.closest('a[data-proxy-href]') : null;
+    if (!a) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    window.location.href = a.getAttribute('data-proxy-href');
+  }, true);
+})();
+</script>
+<script>
+(function() {
   var loading = false;
   var pageNum = 1;
 
@@ -679,7 +755,20 @@ app.all('/api/*', async (req, res) => {
   .leavemoderator, .leavecontributor { background-color: #272729 !important; }
 
   /* Posts / Things */
-  .thing, .link, .comment, .nestedlisting, .panestack-title {
+  .thing, .link, .comment, .nestedlisting, .panestack-title,
+  .comment .midcol, .comment .entry, .comment .child,
+  .sitetable, .sitetable .thing, .nestedlisting .thing {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  div.thing.comment,
+  div.thing.comment > .midcol,
+  div.thing.comment > .entry,
+  div.thing.comment > .child,
+  div.thing.comment > .child > .sitetable,
+  div.thing.comment > .child > .sitetable > .thing,
+  div.comment.noncollapsed,
+  div.comment.collapsed {
     background-color: #1a1a1b !important;
     color: #d7dadc !important;
   }
@@ -764,6 +853,84 @@ app.all('/api/*', async (req, res) => {
   }
   .drop-choices a { color: #d7dadc !important; }
   .drop-choices a:hover { background-color: #343536 !important; }
+
+  /* Comments page */
+  .commentarea, .commentarea > .sitetable,
+  .commentarea .comment, .commentarea .comment .entry,
+  .commentarea .panestack-title, .commentarea .menuarea {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  .comment .child, .comment .showreplies {
+    border-left-color: #343536 !important;
+  }
+  .comment.collapsed .entry { background-color: #1a1a1b !important; }
+  .comment .usertext-body .md {
+    background-color: transparent !important;
+  }
+  /* Sorted by dropdown area */
+  .commentarea .menuarea, .commentarea .menuarea *,
+  .commentarea .panestack-title,
+  .dropdown.lightdrop .selected,
+  .commentarea .flatlist, .commentarea .flat-list {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  /* Main post on comment pages */
+  .linklisting, .linklisting .thing, .linklisting .link,
+  .linklisting .link .entry, .linklisting .link .top-matter,
+  .linklisting .link .usertext-body {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  /* Reply text box */
+  .usertext-edit, .usertext-edit textarea,
+  .usertext-edit .md, .usertext-edit .bottom-area,
+  .usertext button, .save-button,
+  .RESDialogSmall, .RESDialogSmall * {
+    background-color: #272729 !important;
+    color: #d7dadc !important;
+    border-color: #343536 !important;
+  }
+  /* Sticky / mod / automod comments */
+  .comment .stickied-tagline, .stickied .entry,
+  .comment.stickied, .comment.stickied .entry,
+  .comment.stickied .usertext-body .md {
+    background-color: #1a1a1b !important;
+  }
+  /* Page content wrapper */
+  .content[role="main"] {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+
+  /* Content policy / mod warnings / infobar */
+  .content-policy-warning, .content-policy-warning *,
+  .quarantine-notice, .quarantine-notice *,
+  .infobar-toaster, .infobar-toaster *,
+  .interstitial, .interstitial *,
+  .content[role="main"], .content {
+    background-color: #1a1a1b !important;
+    color: #d7dadc !important;
+  }
+  .content-policy-warning a, .quarantine-notice a { color: #4fbcff !important; }
+
+  /* Catch-all for remaining white backgrounds */
+  .commentarea, .commentarea *,
+  .linklisting, .linklisting *,
+  .content[role="main"],
+  .sitetable.listing, .sitetable.listing > *,
+  .nestedlisting, .nestedlisting * {
+    background-color: #1a1a1b !important;
+  }
+  /* Restore specific backgrounds that need #272729 */
+  .expando, .selftext, .md code, .md pre,
+  .usertext-edit, .usertext-edit textarea,
+  .sidebox, .sidebox *, .morelink,
+  .btn, button, input, textarea, select,
+  .promoted, .promotedlink, .thing.promoted {
+    background-color: #272729 !important;
+  }
 
   /* Misc */
   hr, .thing .child { border-color: #343536 !important; }

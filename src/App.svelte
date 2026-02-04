@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
 
   let isScrolling = false;
-  let scrollSpeed = 30; // pixels per second
+  let scrollSpeed = parseInt(localStorage.getItem('scrollerSpeed'), 10) || 30;
+  $: localStorage.setItem('scrollerSpeed', scrollSpeed);
   let showControls = false;
   let animFrameId = null;
   let lastTimestamp = null;

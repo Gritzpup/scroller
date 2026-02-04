@@ -304,6 +304,82 @@ app.all('/api/*', async (req, res) => {
       });
     };
   </script>
+  <script>
+(function() {
+  var PROXY_PREFIX = '';
+  var REDDIT_BASE = 'https://www.reddit.com';
+  var REDDIT_PATH_RE = /^\\/(r\\/|u\\/|user\\/|comments\\/|message\\/|submit|wiki\\/|search|prefs\\/|over18|domain\\/|duplicates\\/|report|live\\/|gallery\\/|poll\\/)/;
+  var SKIP_RE = /^\\/(api\\/static\\/|api\\/tracking\\/|proxy-static\\/)/;
+  var nativeHrefDesc = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href');
+
+  function shouldFixLink(href) {
+    if (!href || href.startsWith('javascript:') || href === '#') return false;
+    var path = href;
+    if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX + '/')) {
+      path = path.substring(PROXY_PREFIX.length);
+    } else if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX)) {
+      path = path.substring(PROXY_PREFIX.length) || '/';
+    }
+    if (SKIP_RE.test(path)) return false;
+    if (path.startsWith('/') && REDDIT_PATH_RE.test(path)) return true;
+    if (path === '/' || path.startsWith('/?')) return true;
+    return false;
+  }
+
+  function getProxyPath(href) {
+    if (PROXY_PREFIX && href.startsWith(PROXY_PREFIX)) return href;
+    return PROXY_PREFIX + href;
+  }
+
+  function getRealUrl(href) {
+    var path = href;
+    if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX + '/')) {
+      path = path.substring(PROXY_PREFIX.length);
+    } else if (PROXY_PREFIX && path.startsWith(PROXY_PREFIX)) {
+      path = path.substring(PROXY_PREFIX.length) || '/';
+    }
+    return REDDIT_BASE + path;
+  }
+
+  function fixLink(a) {
+    var href = a.getAttribute('href');
+    if (!href || a.hasAttribute('data-proxy-href')) return;
+    if (!shouldFixLink(href)) return;
+    var proxyPath = getProxyPath(href);
+    a.setAttribute('data-proxy-href', proxyPath);
+    nativeHrefDesc.set.call(a, getRealUrl(href));
+  }
+
+  function fixAllLinks(root) {
+    var links = (root || document).querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) fixLink(links[i]);
+  }
+
+  document.addEventListener('DOMContentLoaded', function() { fixAllLinks(); });
+
+  var observer = new (window.OriginalMutationObserver || MutationObserver)(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var added = mutations[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType === 1) {
+          if (node.tagName === 'A') fixLink(node);
+          if (node.querySelectorAll) fixAllLinks(node);
+        }
+      }
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest ? e.target.closest('a[data-proxy-href]') : null;
+    if (!a) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    window.location.href = a.getAttribute('data-proxy-href');
+  }, true);
+})();
+  </script>
 `
       );
 
