@@ -18,7 +18,9 @@
 
   let scrolling = false;
   let scrollSpeed = 3;
-  let scrollInterval = null;
+  let animFrameId = null;
+  let lastTimestamp = null;
+  let pixelAccumulator = 0;
 
   console.log('✅ Reddit Auto-Scroller Script Loaded!');
   console.log('📍 URL:', window.location.href);
@@ -57,10 +59,12 @@
       } else if (data.type === 'SCROLLER_STOP') {
         console.log('⏹️ Stopping scroll');
         scrolling = false;
-        if (scrollInterval) {
-          clearInterval(scrollInterval);
-          scrollInterval = null;
+        if (animFrameId) {
+          cancelAnimationFrame(animFrameId);
+          animFrameId = null;
         }
+        lastTimestamp = null;
+        pixelAccumulator = 0;
       } else if (data.type === 'SCROLLER_UPDATE_SPEED') {
         scrollSpeed = data.scrollSpeed;
         console.log('📏 Updated scroll speed:', scrollSpeed);
@@ -79,15 +83,30 @@
     });
 
     function startScrolling() {
-      if (scrollInterval) {
-        clearInterval(scrollInterval);
+      if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+      }
+      lastTimestamp = null;
+      pixelAccumulator = 0;
+
+      function scrollStep(timestamp) {
+        if (!scrolling) return;
+
+        if (lastTimestamp !== null) {
+          const delta = (timestamp - lastTimestamp) / 1000;
+          pixelAccumulator += scrollSpeed * delta;
+          const whole = Math.floor(pixelAccumulator);
+          if (whole >= 1) {
+            window.scrollBy(0, whole);
+            pixelAccumulator -= whole;
+          }
+        }
+
+        lastTimestamp = timestamp;
+        animFrameId = requestAnimationFrame(scrollStep);
       }
 
-      scrollInterval = setInterval(() => {
-        if (scrolling) {
-          window.scrollBy(0, scrollSpeed);
-        }
-      }, 50);
+      animFrameId = requestAnimationFrame(scrollStep);
     }
 
     // Send READY signal to control panel

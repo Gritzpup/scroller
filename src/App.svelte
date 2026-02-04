@@ -2,13 +2,13 @@
   import { onMount, onDestroy } from 'svelte';
 
   let isScrolling = false;
-  let scrollSpeed = 3;
+  let scrollSpeed = 30; // pixels per second
   let showControls = false;
-  let scrollInterval = null;
+  let animFrameId = null;
+  let lastTimestamp = null;
+  let pixelAccumulator = 0;
   let iframeElement = null;
   let proxyUrl = '';
-
-  const SCROLL_INTERVAL = 100; // Check every 100ms
 
   onMount(() => {
     // Use same origin for proxy (combined frontend + backend)
@@ -19,8 +19,8 @@
   });
 
   onDestroy(() => {
-    if (scrollInterval) {
-      clearInterval(scrollInterval);
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
     }
   });
 
@@ -28,41 +28,46 @@
     showControls = !showControls;
   }
 
-  function startScrolling() {
-    if (isScrolling) return;
+  function scrollFrame(timestamp) {
+    if (!isScrolling) return;
 
-    isScrolling = true;
+    if (lastTimestamp !== null) {
+      const delta = (timestamp - lastTimestamp) / 1000; // seconds elapsed
+      pixelAccumulator += scrollSpeed * delta;
+      const whole = Math.floor(pixelAccumulator);
 
-    scrollInterval = setInterval(() => {
-      if (isScrolling && iframeElement) {
+      if (whole >= 1 && iframeElement) {
         try {
-          // Scroll the iframe's document
           const iframeWin = iframeElement.contentWindow;
           if (iframeWin) {
-            iframeWin.scrollBy(0, scrollSpeed);
+            iframeWin.scrollBy(0, whole);
           }
         } catch (e) {
-          // Cross-origin iframe - try scrolling via contentWindow
-          try {
-            iframeElement.contentWindow.scrollBy(0, scrollSpeed);
-          } catch (err) {
-            console.log('Cannot scroll cross-origin iframe:', err.message);
-          }
+          console.log('Cannot scroll iframe:', e.message);
         }
+        pixelAccumulator -= whole;
       }
-    }, SCROLL_INTERVAL);
+    }
+
+    lastTimestamp = timestamp;
+    animFrameId = requestAnimationFrame(scrollFrame);
+  }
+
+  function startScrolling() {
+    if (isScrolling) return;
+    isScrolling = true;
+    lastTimestamp = null;
+    animFrameId = requestAnimationFrame(scrollFrame);
   }
 
   function stopScrolling() {
     isScrolling = false;
-    if (scrollInterval) {
-      clearInterval(scrollInterval);
-      scrollInterval = null;
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
     }
-  }
-
-  function updateSpeed() {
-    // Speed updates in real-time while scrolling
+    lastTimestamp = null;
+    pixelAccumulator = 0;
   }
 
   let loginStatus = '';
@@ -144,17 +149,17 @@
 
         <div class="settings">
           <label for="speed">
-            Speed: <strong>{scrollSpeed}px</strong>
+            Speed: <strong>{scrollSpeed}px/s</strong>
           </label>
           <input
             id="speed"
             type="range"
             min="1"
-            max="20"
+            max="200"
+            step="5"
             bind:value={scrollSpeed}
-            on:change={updateSpeed}
           />
-          <small>Pixels per scroll</small>
+          <small>Pixels per second</small>
         </div>
 
         <div class="status">
