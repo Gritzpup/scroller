@@ -527,6 +527,71 @@ app.all('/api/*', async (req, res) => {
       throw err
     })
   }
+</script>
+<script>
+(function() {
+  var loading = false;
+  var pageNum = 1;
+
+  function getNextUrl() {
+    var nextBtn = document.querySelector('.next-button a');
+    return nextBtn ? nextBtn.href : null;
+  }
+
+  function loadNextPage() {
+    if (loading) return;
+    var nextUrl = getNextUrl();
+    if (!nextUrl) return;
+
+    loading = true;
+    pageNum++;
+
+    var marker = document.createElement('div');
+    marker.style.cssText = 'text-align:center;padding:20px;color:#818384;font-size:14px;border-top:2px solid #343536;margin:10px 0;';
+    marker.textContent = 'Loading page ' + pageNum + '...';
+    var siteTable = document.querySelector('#siteTable');
+    if (siteTable) siteTable.appendChild(marker);
+
+    fetch(nextUrl)
+      .then(function(r) { return r.text(); })
+      .then(function(html) {
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(html, 'text/html');
+        var newPosts = doc.querySelectorAll('#siteTable > .thing');
+        var newNext = doc.querySelector('.next-button a');
+
+        if (siteTable && newPosts.length > 0) {
+          marker.textContent = 'Page ' + pageNum;
+          newPosts.forEach(function(post) {
+            siteTable.appendChild(post);
+          });
+
+          // Update next button for the following page
+          var oldNext = document.querySelector('.next-button a');
+          if (oldNext && newNext) {
+            oldNext.href = newNext.href;
+          } else if (!newNext) {
+            var nb = document.querySelector('.next-button');
+            if (nb) nb.remove();
+          }
+        } else {
+          marker.textContent = 'No more posts';
+        }
+        loading = false;
+      })
+      .catch(function(err) {
+        console.error('Infinite scroll error:', err);
+        marker.textContent = 'Error loading page';
+        loading = false;
+      });
+  }
+
+  window.addEventListener('scroll', function() {
+    if (document.documentElement.scrollHeight - window.scrollY - window.innerHeight < 800) {
+      loadNextPage();
+    }
+  });
+})();
 </script>`
 
       const nightModeCSS = `<style id="scroller-nightmode">
@@ -622,9 +687,19 @@ app.all('/api/*', async (req, res) => {
     background-color: transparent !important;
   }
   .link, .thing.link {
-    border-bottom: 1px solid #343536 !important;
-    padding-bottom: 12px !important;
-    margin-bottom: 10px !important;
+    border-bottom: 0 !important;
+    margin-bottom: 0 !important;
+  }
+  #siteTable > .thing + .clearleft + .thing,
+  #siteTable > .thing + .thing {
+    border-top: 6px solid #343536 !important;
+  }
+  .promoted, .promotedlink, .thing.promoted, .thing.promotedlink {
+    border: 1px solid #343536 !important;
+    outline: none !important;
+    background-color: #272729 !important;
+    border-radius: 4px !important;
+    padding: 8px !important;
   }
   .link .title a, .link .title a:visited {
     color: #d7dadc !important;

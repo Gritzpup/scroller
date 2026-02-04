@@ -40,9 +40,9 @@
       if (isScrolling && iframeElement) {
         try {
           // Scroll the iframe's document
-          const iframeDoc = iframeElement.contentDocument || iframeElement.contentWindow.document;
-          if (iframeDoc) {
-            iframeDoc.documentElement.scrollTop += scrollSpeed;
+          const iframeWin = iframeElement.contentWindow;
+          if (iframeWin) {
+            iframeWin.scrollBy(0, scrollSpeed);
           }
         } catch (e) {
           // Cross-origin iframe - try scrolling via contentWindow
