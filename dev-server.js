@@ -585,7 +585,9 @@ app.all('/api/*', async (req, res) => {
   }
   .morelink { background-color: #272729 !important; border-color: #343536 !important; }
   .morelink a { color: #d7dadc !important; }
-  .morelink .nub { background-color: #272729 !important; }
+  .morelink .nub, .sidebox .nub, .nub {
+    display: none !important;
+  }
   .sidebox .spacer, .account-activity-box,
   .premium-banner, .premium-banner *,
   .create-your-own, .goldvertisement {
@@ -618,6 +620,11 @@ app.all('/api/*', async (req, res) => {
   }
   .link .entry, .comment .entry {
     background-color: transparent !important;
+  }
+  .link, .thing.link {
+    border-bottom: 1px solid #343536 !important;
+    padding-bottom: 12px !important;
+    margin-bottom: 10px !important;
   }
   .link .title a, .link .title a:visited {
     color: #d7dadc !important;
@@ -760,7 +767,9 @@ app.all('/api/*', async (req, res) => {
     color: #d7dadc !important;
     border-color: #343536 !important;
   }
-  .sidebox .nub { background-color: #272729 !important; }
+  .sidebox .nub {
+    display: none !important;
+  }
 
   /* Catch-all: any remaining white backgrounds in the side */
   .side div[style*="background"], .side .content {
