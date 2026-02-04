@@ -11,10 +11,8 @@
   const SCROLL_INTERVAL = 100; // Check every 100ms
 
   onMount(() => {
-    // Build dynamic proxy URL based on current hostname
-    const hostname = window.location.hostname;
-    const protocol = window.location.protocol;
-    proxyUrl = `${protocol}//${hostname}:5178/`;
+    // Use same origin for proxy (combined frontend + backend)
+    proxyUrl = '/api/';
 
     console.log('📡 Proxy URL:', proxyUrl);
 
@@ -70,18 +68,29 @@
     // Speed updates in real-time while scrolling
   }
 
-  function loginToReddit() {
-    console.log('🔐 Login button clicked');
-    console.log('  proxyUrl:', proxyUrl);
+  let loginStatus = '';
 
-    // Get fresh reference to iframe
-    const frame = document.querySelector('iframe');
-    if (frame) {
-      console.log('✅ Navigating iframe to login page...');
-      // Navigate to the login page with cache-busting
-      frame.src = proxyUrl + 'login/?t=' + Date.now();
-    } else {
-      console.error('❌ Iframe element not found');
+  async function loginToReddit() {
+    console.log('🔐 Auto-extracting Reddit session from Brave...');
+    loginStatus = 'Connecting...';
+    try {
+      const resp = await fetch('/auth/login');
+      const data = await resp.json();
+      if (data.ok) {
+        loginStatus = `Logged in as u/${data.username}`;
+        console.log(`✅ ${loginStatus}`);
+        // Reload iframe to show logged-in Reddit
+        const frame = document.querySelector('iframe');
+        if (frame) {
+          frame.src = proxyUrl + '?t=' + Date.now();
+        }
+      } else {
+        loginStatus = data.error;
+        console.error('❌ Login failed:', data.error);
+      }
+    } catch (err) {
+      loginStatus = 'Connection error';
+      console.error('❌ Login error:', err);
     }
   }
 </script>
@@ -93,7 +102,6 @@
       title="Reddit"
       src={proxyUrl}
       class="reddit-frame"
-      sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-navigation"
     ></iframe>
   {/if}
 
@@ -114,11 +122,15 @@
       <div class="control-panel">
         <h3>Auto-Scroll</h3>
 
+
         <div class="controls">
           <button class="btn btn-login" on:click={loginToReddit}>
             🔐 Login
           </button>
         </div>
+        {#if loginStatus}
+          <div class="login-status">{loginStatus}</div>
+        {/if}
 
         <div class="controls">
           {#if !isScrolling}
@@ -322,6 +334,14 @@
   .btn-login:hover {
     background: #005fa3;
     transform: translateY(-1px);
+  }
+
+  .login-status {
+    font-size: 11px;
+    color: #576f76;
+    text-align: center;
+    margin-bottom: 10px;
+    word-break: break-word;
   }
 
   .settings {
