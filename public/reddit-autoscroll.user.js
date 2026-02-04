@@ -20,7 +20,7 @@
   let scrollSpeed = 3;
   let animFrameId = null;
   let lastTimestamp = null;
-  let pixelAccumulator = 0;
+  let exactScrollY = 0;
 
   console.log('✅ Reddit Auto-Scroller Script Loaded!');
   console.log('📍 URL:', window.location.href);
@@ -64,7 +64,6 @@
           animFrameId = null;
         }
         lastTimestamp = null;
-        pixelAccumulator = 0;
       } else if (data.type === 'SCROLLER_UPDATE_SPEED') {
         scrollSpeed = data.scrollSpeed;
         console.log('📏 Updated scroll speed:', scrollSpeed);
@@ -87,19 +86,20 @@
         cancelAnimationFrame(animFrameId);
       }
       lastTimestamp = null;
-      pixelAccumulator = 0;
+      exactScrollY = window.scrollY;
 
       function scrollStep(timestamp) {
         if (!scrolling) return;
 
         if (lastTimestamp !== null) {
           const delta = (timestamp - lastTimestamp) / 1000;
-          pixelAccumulator += scrollSpeed * delta;
-          const whole = Math.floor(pixelAccumulator);
-          if (whole >= 1) {
-            window.scrollBy(0, whole);
-            pixelAccumulator -= whole;
+          const currentActual = window.scrollY;
+          // Re-sync if user scrolled manually
+          if (Math.abs(currentActual - Math.round(exactScrollY)) > 1) {
+            exactScrollY = currentActual;
           }
+          exactScrollY += scrollSpeed * delta;
+          window.scrollTo(0, exactScrollY);
         }
 
         lastTimestamp = timestamp;

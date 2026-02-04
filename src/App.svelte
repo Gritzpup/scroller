@@ -6,7 +6,7 @@
   let showControls = false;
   let animFrameId = null;
   let lastTimestamp = null;
-  let pixelAccumulator = 0;
+  let exactScrollY = 0;
   let iframeElement = null;
   let proxyUrl = '';
 
@@ -32,20 +32,22 @@
     if (!isScrolling) return;
 
     if (lastTimestamp !== null) {
-      const delta = (timestamp - lastTimestamp) / 1000; // seconds elapsed
-      pixelAccumulator += scrollSpeed * delta;
-      const whole = Math.floor(pixelAccumulator);
+      const delta = (timestamp - lastTimestamp) / 1000;
 
-      if (whole >= 1 && iframeElement) {
+      if (iframeElement) {
         try {
           const iframeWin = iframeElement.contentWindow;
           if (iframeWin) {
-            iframeWin.scrollBy(0, whole);
+            const currentActual = iframeWin.scrollY;
+            if (Math.abs(currentActual - Math.round(exactScrollY)) > 1) {
+              exactScrollY = currentActual;
+            }
+            exactScrollY += scrollSpeed * delta;
+            iframeWin.scrollTo(0, exactScrollY);
           }
         } catch (e) {
           console.log('Cannot scroll iframe:', e.message);
         }
-        pixelAccumulator -= whole;
       }
     }
 
@@ -57,6 +59,11 @@
     if (isScrolling) return;
     isScrolling = true;
     lastTimestamp = null;
+    try {
+      exactScrollY = iframeElement?.contentWindow?.scrollY || 0;
+    } catch (e) {
+      exactScrollY = 0;
+    }
     animFrameId = requestAnimationFrame(scrollFrame);
   }
 
@@ -67,7 +74,6 @@
       animFrameId = null;
     }
     lastTimestamp = null;
-    pixelAccumulator = 0;
   }
 
   let loginStatus = '';
