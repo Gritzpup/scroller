@@ -12,16 +12,42 @@
   let proxyUrl = '';
 
   onMount(() => {
-    // Use same origin for proxy (combined frontend + backend)
     proxyUrl = '/api/';
+    checkLoginStatus();
+    scheduleAutoRefresh();
 
-    console.log('📡 Proxy URL:', proxyUrl);
-
+    // Auto-resume scrolling if it was active before refresh
+    if (localStorage.getItem('scrollerActive') === 'true') {
+      // Wait for iframe to load before starting
+      const waitForIframe = () => {
+        if (iframeElement && iframeElement.contentWindow) {
+          startScrolling();
+        } else {
+          setTimeout(waitForIframe, 200);
+        }
+      };
+      setTimeout(waitForIframe, 500);
+    }
   });
+
+  // Auto-refresh every 4 hours to keep content fresh
+  const REFRESH_INTERVAL = 4 * 60 * 60 * 1000;
+  let refreshTimer = null;
+
+  function scheduleAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      console.log('Auto-refreshing scroller (4-hour interval)');
+      reloadIframe();
+    }, REFRESH_INTERVAL);
+  }
 
   onDestroy(() => {
     if (animFrameId) {
       cancelAnimationFrame(animFrameId);
+    }
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
     }
   });
 
@@ -59,6 +85,7 @@
   function startScrolling() {
     if (isScrolling) return;
     isScrolling = true;
+    localStorage.setItem('scrollerActive', 'true');
     lastTimestamp = null;
     try {
       exactScrollY = iframeElement?.contentWindow?.scrollY || 0;
@@ -70,6 +97,7 @@
 
   function stopScrolling() {
     isScrolling = false;
+    localStorage.setItem('scrollerActive', 'false');
     if (animFrameId) {
       cancelAnimationFrame(animFrameId);
       animFrameId = null;
@@ -78,28 +106,86 @@
   }
 
   let loginStatus = '';
+  let currentUser = null;
+  let storedAccounts = [];
 
-  async function loginToReddit() {
-    console.log('🔐 Auto-extracting Reddit session from Brave...');
-    loginStatus = 'Connecting...';
+  async function checkLoginStatus() {
     try {
-      const resp = await fetch('/auth/login');
+      const resp = await fetch('/auth/status');
+      const data = await resp.json();
+      currentUser = data.loggedIn ? data.username : null;
+      storedAccounts = data.accounts || [];
+      if (currentUser) loginStatus = '';
+    } catch (e) {}
+  }
+
+  async function logout() {
+    try {
+      const resp = await fetch('/auth/logout', { method: 'POST' });
+      const data = await resp.json();
+      currentUser = null;
+      storedAccounts = data.accounts || [];
+      loginStatus = '';
+      reloadIframe();
+    } catch (e) {}
+  }
+
+  async function switchAccount(username) {
+    loginStatus = 'Switching...';
+    try {
+      const resp = await fetch('/auth/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username })
+      });
       const data = await resp.json();
       if (data.ok) {
-        loginStatus = `Logged in as u/${data.username}`;
-        console.log(`✅ ${loginStatus}`);
-        // Reload iframe to show logged-in Reddit
-        const frame = document.querySelector('iframe');
-        if (frame) {
-          frame.src = proxyUrl + '?t=' + Date.now();
-        }
+        currentUser = data.username;
+        loginStatus = '';
+        reloadIframe();
       } else {
         loginStatus = data.error;
-        console.error('❌ Login failed:', data.error);
       }
-    } catch (err) {
-      loginStatus = 'Connection error';
-      console.error('❌ Login error:', err);
+    } catch (e) {
+      loginStatus = 'Error switching';
+    }
+  }
+
+  function addAccount() {
+    const w = 500, h = 600;
+    const left = (screen.width - w) / 2;
+    const top = (screen.height - h) / 2;
+    const popup = window.open(
+      '/auth/login-page',
+      'reddit_login',
+      `width=${w},height=${h},left=${left},top=${top}`
+    );
+    loginStatus = 'Log in with the popup...';
+    const poll = setInterval(async () => {
+      if (!popup || popup.closed) {
+        clearInterval(poll);
+        loginStatus = 'Extracting session...';
+        try {
+          const resp = await fetch('/auth/add-account');
+          const data = await resp.json();
+          if (data.ok) {
+            currentUser = data.username;
+            storedAccounts = data.accounts || [];
+            loginStatus = '';
+            reloadIframe();
+          } else {
+            loginStatus = data.error;
+          }
+        } catch (e) {
+          loginStatus = 'Error extracting session';
+        }
+      }
+    }, 500);
+  }
+
+  function reloadIframe() {
+    if (iframeElement) {
+      iframeElement.src = proxyUrl + '?t=' + Date.now();
     }
   }
 </script>
@@ -133,11 +219,21 @@
         <h3>Auto-Scroll</h3>
 
 
-        <div class="controls">
-          <button class="btn btn-login" on:click={loginToReddit}>
-            🔐 Login
-          </button>
-        </div>
+        {#if currentUser}
+          <div class="login-status">u/{currentUser}</div>
+          <div class="controls">
+            <button class="btn btn-logout" on:click={logout}>Logout</button>
+          </div>
+        {:else}
+          {#each storedAccounts as acct}
+            <div class="controls">
+              <button class="btn btn-account" on:click={() => switchAccount(acct)}>u/{acct}</button>
+            </div>
+          {/each}
+          <div class="controls">
+            <button class="btn btn-login" on:click={addAccount}>+ Add Account</button>
+          </div>
+        {/if}
         {#if loginStatus}
           <div class="login-status">{loginStatus}</div>
         {/if}
@@ -344,6 +440,29 @@
 
   .btn-login:hover {
     background: #005fa3;
+    transform: translateY(-1px);
+  }
+
+  .btn-logout {
+    background: #343536;
+    color: #d7dadc;
+    width: 100%;
+  }
+
+  .btn-logout:hover {
+    background: #4a4a4c;
+    transform: translateY(-1px);
+  }
+
+  .btn-account {
+    background: #272729;
+    color: #4fbcff;
+    width: 100%;
+    border: 1px solid #343536;
+  }
+
+  .btn-account:hover {
+    background: #343536;
     transform: translateY(-1px);
   }
 

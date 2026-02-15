@@ -9,10 +9,10 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const COOKIE_FILE = join(__dirname, '.session-cookies.json')
+const PORT = parseInt(process.env.SCROLLER_PORT, 10) || 5177
+const COOKIE_FILE = join(__dirname, `.session-cookies-${PORT}.json`)
 
 const app = express()
-const PORT = 5177
 
 const sessionCookies = new Map()
 
@@ -300,11 +300,18 @@ function extractBraveCookie() {
     throw new Error('Brave cookie database not found')
   }
 
+  // Copy the database to a temp file so we can read the WAL (fresh cookies)
+  const tmpDb = '/tmp/brave-cookies-tmp.db'
+  execSync(`cp "${cookieDb}" "${tmpDb}" && cp "${cookieDb}-wal" "${tmpDb}-wal" 2>/dev/null; cp "${cookieDb}-shm" "${tmpDb}-shm" 2>/dev/null; true`)
+
   // Query the encrypted cookie value via sqlite3 CLI (hex-encoded)
   const hex = execSync(
-    `sqlite3 "file:${cookieDb}?immutable=1" "SELECT hex(encrypted_value) FROM cookies WHERE host_key LIKE '%reddit.com' AND name = 'reddit_session' LIMIT 1;"`,
+    `sqlite3 "${tmpDb}" "SELECT hex(encrypted_value) FROM cookies WHERE host_key LIKE '%reddit.com' AND name = 'reddit_session' ORDER BY last_access_utc DESC LIMIT 1;"`,
     { encoding: 'utf-8' }
   ).trim()
+
+  // Clean up temp files
+  execSync(`rm -f "${tmpDb}" "${tmpDb}-wal" "${tmpDb}-shm" 2>/dev/null; true`)
 
   if (!hex) {
     throw new Error('reddit_session cookie not found in Brave — are you logged into Reddit?')
@@ -313,6 +320,181 @@ function extractBraveCookie() {
   const encrypted = Buffer.from(hex, 'hex')
   return decryptChromiumCookie(encrypted)
 }
+
+// Stored accounts file (per-port, maps username -> cookies array)
+const ACCOUNTS_FILE = join(__dirname, `.scroller-accounts-${PORT}.json`)
+let storedAccounts = {}
+try {
+  if (existsSync(ACCOUNTS_FILE)) {
+    storedAccounts = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf-8'))
+    console.log(`👥 Loaded ${Object.keys(storedAccounts).length} stored accounts`)
+  }
+} catch (e) {}
+
+function saveAccounts() {
+  try { writeFileSync(ACCOUNTS_FILE, JSON.stringify(storedAccounts, null, 2)) } catch (e) {}
+}
+
+// Verify cookies against Reddit API and return username
+async function verifyRedditCookies(cookies) {
+  const testResponse = await fetch('https://old.reddit.com/api/me.json', {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Cookie': cookies.join('; ')
+    }
+  })
+  const meData = await testResponse.text()
+  try {
+    const parsed = JSON.parse(meData)
+    return parsed?.data?.name || null
+  } catch (e) { return null }
+}
+
+// Check current login status
+app.get('/auth/status', async (req, res) => {
+  try {
+    const cookies = getSessionCookies('default')
+    if (!cookies.some(c => c.startsWith('reddit_session='))) {
+      return res.json({ loggedIn: false, accounts: Object.keys(storedAccounts) })
+    }
+    const username = await verifyRedditCookies(cookies)
+    if (username) {
+      // Save/update this account
+      storedAccounts[username] = [...cookies]
+      saveAccounts()
+      res.json({ loggedIn: true, username, accounts: Object.keys(storedAccounts) })
+    } else {
+      res.json({ loggedIn: false, accounts: Object.keys(storedAccounts) })
+    }
+  } catch (error) {
+    res.json({ loggedIn: false, accounts: Object.keys(storedAccounts) })
+  }
+})
+
+// Logout: clear active session (keeps stored accounts)
+app.post('/auth/logout', (req, res) => {
+  const cookies = getSessionCookies('default')
+  cookies.length = 0
+  saveCookies()
+  console.log('🔓 Logged out - active session cleared')
+  res.json({ ok: true, accounts: Object.keys(storedAccounts) })
+})
+
+// Switch to a stored account
+app.post('/auth/switch', express.json(), (req, res) => {
+  const { username } = req.body
+  if (!username || !storedAccounts[username]) {
+    return res.json({ ok: false, error: 'Account not found' })
+  }
+  const cookies = getSessionCookies('default')
+  cookies.length = 0
+  storedAccounts[username].forEach(c => cookies.push(c))
+  saveCookies()
+  console.log(`🔄 Switched to account: ${username}`)
+  res.json({ ok: true, username })
+})
+
+// Add account: check if proxy has captured new cookies and store them
+app.get('/auth/add-account', async (req, res) => {
+  try {
+    const cookies = getSessionCookies('default')
+    const username = await verifyRedditCookies(cookies)
+    if (username) {
+      storedAccounts[username] = [...cookies]
+      saveAccounts()
+      console.log(`✅ Stored account: ${username}`)
+      res.json({ ok: true, username, accounts: Object.keys(storedAccounts) })
+    } else {
+      // Try Brave extraction as fallback (only works on server machine)
+      try {
+        const cookieValue = extractBraveCookie()
+        const newCookies = [`reddit_session=${cookieValue}`]
+        const braveUser = await verifyRedditCookies(newCookies)
+        if (braveUser) {
+          const currentCookies = getSessionCookies('default')
+          const idx = currentCookies.findIndex(c => c.startsWith('reddit_session='))
+          if (idx >= 0) currentCookies[idx] = `reddit_session=${cookieValue}`
+          else currentCookies.push(`reddit_session=${cookieValue}`)
+          saveCookies()
+          storedAccounts[braveUser] = [...currentCookies]
+          saveAccounts()
+          res.json({ ok: true, username: braveUser, accounts: Object.keys(storedAccounts) })
+        } else {
+          res.json({ ok: false, error: 'Could not verify login. Try again.' })
+        }
+      } catch (e) {
+        res.json({ ok: false, error: 'Could not verify login. Try again.' })
+      }
+    }
+  } catch (error) {
+    res.json({ ok: false, error: error.message })
+  }
+})
+
+// Dedicated login POST - handles Reddit's redirects properly
+// Login page popup - instructs user to log in via Brave on the server
+app.get('/auth/login-page', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Add Reddit Account</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a1b; color: #d7dadc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-box { background: #272729; border: 1px solid #343536; border-radius: 12px; padding: 32px; width: 400px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+    h2 { margin-bottom: 16px; font-size: 20px; text-align: center; }
+    .steps { margin-bottom: 20px; }
+    .step { display: flex; gap: 10px; margin-bottom: 12px; font-size: 14px; line-height: 1.4; }
+    .step-num { background: #ff4500; color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+    button { width: 100%; padding: 12px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; margin-bottom: 8px; }
+    .btn-extract { background: #ff4500; color: white; }
+    .btn-extract:hover { background: #cc3700; }
+    .btn-extract:disabled { background: #555; cursor: not-allowed; }
+    .msg { font-size: 13px; margin-top: 8px; text-align: center; }
+    .msg.error { color: #ff4500; }
+    .msg.success { color: #28a745; }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h2>Add Reddit Account</h2>
+    <div class="steps">
+      <div class="step"><span class="step-num">1</span><span>Log into Reddit in Brave on the server machine</span></div>
+      <div class="step"><span class="step-num">2</span><span>Click the button below to pull the session</span></div>
+    </div>
+    <button class="btn-extract" id="extractBtn" onclick="extract()">Pull Account from Brave</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <script>
+    async function extract() {
+      var btn = document.getElementById('extractBtn');
+      var msg = document.getElementById('msg');
+      btn.disabled = true;
+      btn.textContent = 'Extracting...';
+      msg.className = 'msg';
+      msg.textContent = '';
+      try {
+        var resp = await fetch('/auth/add-account');
+        var data = await resp.json();
+        if (data.ok) {
+          msg.className = 'msg success';
+          msg.textContent = 'Added u/' + data.username + '!';
+          setTimeout(function() { window.close(); }, 1200);
+        } else {
+          msg.className = 'msg error';
+          msg.textContent = data.error || 'Failed to extract session';
+        }
+      } catch (e) {
+        msg.className = 'msg error';
+        msg.textContent = 'Connection error';
+      }
+      btn.disabled = false;
+      btn.textContent = 'Pull Account from Brave';
+    }
+  </script>
+</body>
+</html>`)
+})
 
 // Auto-login: extract cookie from Brave and verify it
 app.get('/auth/login', async (req, res) => {
@@ -368,9 +550,8 @@ app.all('/api/*', async (req, res) => {
   try {
     const sessionId = 'default'
     const pathAfterApi = req.path.substring('/api'.length) || '/'
-    const isLoginPage = pathAfterApi.includes('/login') || pathAfterApi.includes('/auth')
-    const domain = isLoginPage ? 'https://www.reddit.com' : 'https://old.reddit.com'
-    const redditUrl = domain + pathAfterApi
+    const queryString = req.originalUrl.includes('?') ? req.originalUrl.substring(req.originalUrl.indexOf('?')) : ''
+    const redditUrl = 'https://old.reddit.com' + pathAfterApi + queryString
 
     console.log(`📡 Proxying: ${redditUrl}`)
 
@@ -399,17 +580,23 @@ app.all('/api/*', async (req, res) => {
 
     // For POST/PUT/PATCH requests, forward the body
     if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
-      let bodyData = ''
-      if (req.body) {
-        bodyData = typeof req.body === 'string' ? req.body : JSON.stringify(req.body)
+      const reqContentType = req.headers['content-type'] || ''
+      if (reqContentType.includes('application/x-www-form-urlencoded') && req.body && typeof req.body === 'object') {
+        // Re-encode parsed form data back to URL-encoded format
+        fetchOptions.body = new URLSearchParams(req.body).toString()
+        headers['Content-Type'] = 'application/x-www-form-urlencoded'
       } else {
-        // If body is not parsed, read from stream
-        for await (const chunk of req) {
-          bodyData += chunk
+        let bodyData = ''
+        if (req.body) {
+          bodyData = typeof req.body === 'string' ? req.body : JSON.stringify(req.body)
+        } else {
+          for await (const chunk of req) {
+            bodyData += chunk
+          }
         }
-      }
-      if (bodyData) {
-        fetchOptions.body = bodyData
+        if (bodyData) {
+          fetchOptions.body = bodyData
+        }
       }
     }
 
@@ -608,10 +795,17 @@ app.all('/api/*', async (req, res) => {
 (function() {
   var loading = false;
   var pageNum = 1;
+  var seenPosts = new Set();
+
+  // Track posts already on the initial page
+  document.querySelectorAll('#siteTable > .thing[data-fullname]').forEach(function(post) {
+    seenPosts.add(post.getAttribute('data-fullname'));
+  });
 
   function getNextUrl() {
     var nextBtn = document.querySelector('.next-button a');
-    return nextBtn ? nextBtn.href : null;
+    if (!nextBtn) return null;
+    return nextBtn.getAttribute('data-proxy-href') || nextBtn.getAttribute('href');
   }
 
   function loadNextPage() {
@@ -639,13 +833,17 @@ app.all('/api/*', async (req, res) => {
         if (siteTable && newPosts.length > 0) {
           marker.textContent = 'Page ' + pageNum;
           newPosts.forEach(function(post) {
+            var fullname = post.getAttribute('data-fullname');
+            if (fullname && seenPosts.has(fullname)) return;
+            if (fullname) seenPosts.add(fullname);
             siteTable.appendChild(post);
           });
 
           // Update next button for the following page
           var oldNext = document.querySelector('.next-button a');
           if (oldNext && newNext) {
-            oldNext.href = newNext.href;
+            var newHref = newNext.getAttribute('href');
+            oldNext.setAttribute('data-proxy-href', newHref);
           } else if (!newNext) {
             var nb = document.querySelector('.next-button');
             if (nb) nb.remove();
@@ -1053,7 +1251,7 @@ app.all('/tracking/*', (req, res) => {
 // Create Vite server for dev
 async function start() {
   const vite = await createViteServer({
-    server: { middlewareMode: true }
+    server: { middlewareMode: true, hmr: { port: PORT + 1000 } }
   })
 
   // Use vite's connect instance as middleware
