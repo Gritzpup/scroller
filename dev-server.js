@@ -545,6 +545,112 @@ app.get('/auth/login', async (req, res) => {
   }
 })
 
+// Media proxy for v.redd.it, i.redd.it, preview.redd.it
+app.all('/api/media/v/*', async (req, res) => {
+  try {
+    const urlPath = req.path.substring('/api/media/v'.length)
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+    const mediaUrl = `https://v.redd.it${urlPath}${queryString}`
+
+    console.log(`🎬 Proxying video: ${mediaUrl}`)
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+      'Referer': 'https://www.reddit.com/'
+    }
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range
+    }
+
+    const response = await fetch(mediaUrl, { method: 'GET', headers })
+    const buffer = await response.buffer()
+
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Accept-Ranges', 'bytes')
+    const ct = response.headers.get('content-type')
+    if (ct) res.setHeader('Content-Type', ct)
+    const cl = response.headers.get('content-length')
+    if (cl) res.setHeader('Content-Length', cl)
+    const cr = response.headers.get('content-range')
+    if (cr) res.setHeader('Content-Range', cr)
+
+    res.status(response.status).send(buffer)
+  } catch (error) {
+    console.error('❌ Video proxy error:', error.message)
+    res.status(500).send('Video proxy error: ' + error.message)
+  }
+})
+
+app.all('/api/media/i/*', async (req, res) => {
+  try {
+    const urlPath = req.path.substring('/api/media/i'.length)
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+    const mediaUrl = `https://i.redd.it${urlPath}${queryString}`
+
+    console.log(`🖼️ Proxying image: ${mediaUrl}`)
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+      'Referer': 'https://www.reddit.com/'
+    }
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range
+    }
+
+    const response = await fetch(mediaUrl, { method: 'GET', headers })
+    const buffer = await response.buffer()
+
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Accept-Ranges', 'bytes')
+    const ct = response.headers.get('content-type')
+    if (ct) res.setHeader('Content-Type', ct)
+    const cl = response.headers.get('content-length')
+    if (cl) res.setHeader('Content-Length', cl)
+    const cr = response.headers.get('content-range')
+    if (cr) res.setHeader('Content-Range', cr)
+
+    res.status(response.status).send(buffer)
+  } catch (error) {
+    console.error('❌ Image proxy error:', error.message)
+    res.status(500).send('Image proxy error: ' + error.message)
+  }
+})
+
+app.all('/api/media/preview/*', async (req, res) => {
+  try {
+    const urlPath = req.path.substring('/api/media/preview'.length)
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+    const mediaUrl = `https://preview.redd.it${urlPath}${queryString}`
+
+    console.log(`🖼️ Proxying preview: ${mediaUrl}`)
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+      'Referer': 'https://www.reddit.com/'
+    }
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range
+    }
+
+    const response = await fetch(mediaUrl, { method: 'GET', headers })
+    const buffer = await response.buffer()
+
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Accept-Ranges', 'bytes')
+    const ct = response.headers.get('content-type')
+    if (ct) res.setHeader('Content-Type', ct)
+    const cl = response.headers.get('content-length')
+    if (cl) res.setHeader('Content-Length', cl)
+    const cr = response.headers.get('content-range')
+    if (cr) res.setHeader('Content-Range', cr)
+
+    res.status(response.status).send(buffer)
+  } catch (error) {
+    console.error('❌ Preview proxy error:', error.message)
+    res.status(500).send('Preview proxy error: ' + error.message)
+  }
+})
+
 // Proxy for /api/* requests
 app.all('/api/*', async (req, res) => {
   try {
@@ -654,6 +760,9 @@ app.all('/api/*', async (req, res) => {
       html = html.replace(/https:\/\/www\.reddit\.com/g, '/api')
       html = html.replace(/https:\/\/old\.reddit\.com/g, '/api')
       html = html.replace(/https:\/\/reddit\.com/g, '/api')
+      html = html.replace(/https:\/\/v\.redd\.it/g, '/api/media/v')
+      html = html.replace(/https:\/\/i\.redd\.it/g, '/api/media/i')
+      html = html.replace(/https:\/\/preview\.redd\.it/g, '/api/media/preview')
       html = html.replace(/https:\/\/w3-reporting\.reddit\.com/g, '/api/tracking/w3-reporting')
       html = html.replace(/https:\/\/error-tracking\.reddit\.com/g, '/api/tracking/error-tracking')
 
@@ -666,6 +775,9 @@ app.all('/api/*', async (req, res) => {
     if (url.startsWith('https://reddit.com')) return url.substring('https://reddit.com'.length) || '/'
     if (url.startsWith('https://www.redditstatic.com')) return '/api/static/' + url.substring('https://www.redditstatic.com/'.length)
     if (url.startsWith('https://redditstatic.com')) return '/api/static/' + url.substring('https://redditstatic.com/'.length)
+    if (url.startsWith('https://v.redd.it')) return '/api/media/v' + url.substring('https://v.redd.it'.length)
+    if (url.startsWith('https://i.redd.it')) return '/api/media/i' + url.substring('https://i.redd.it'.length)
+    if (url.startsWith('https://preview.redd.it')) return '/api/media/preview' + url.substring('https://preview.redd.it'.length)
     if (url.startsWith('https://w3-reporting.reddit.com')) return '/api/tracking/w3-reporting' + url.substring('https://w3-reporting.reddit.com'.length)
     if (url.startsWith('https://error-tracking.reddit.com')) return '/api/tracking/error-tracking' + url.substring('https://error-tracking.reddit.com'.length)
     return url
@@ -1128,6 +1240,24 @@ app.all('/api/*', async (req, res) => {
   .btn, button, input, textarea, select,
   .promoted, .promotedlink, .thing.promoted {
     background-color: #272729 !important;
+  }
+
+  /* Video player - keep overlays transparent so video is visible */
+  video,
+  .media-preview, .media-preview *,
+  .media-preview-content, .media-preview-content *,
+  .video-player, .video-player *,
+  .reddit-video-player-root, .reddit-video-player-root *,
+  [id^="video-"], [id^="video-"] *,
+  [id^="media-preview-"], [id^="media-preview-"] *,
+  .playback-controls, .playback-controls *,
+  .buffering-controls, .buffering-controls *,
+  .ended-controls, .ended-controls *,
+  .interstitial-controls, .interstitial-controls * {
+    background-color: transparent !important;
+  }
+  .expando .media-preview {
+    background-color: #000 !important;
   }
 
   /* Misc */
