@@ -7,6 +7,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# User-specific files
+.session-cookies-*.json
+.scroller-accounts-*.json
+
 .session-cookies.json
 node_modules
 dist

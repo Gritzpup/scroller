@@ -930,9 +930,8 @@ app.all('/api/*', async (req, res) => {
 
     var marker = document.createElement('div');
     marker.style.cssText = 'text-align:center;padding:20px;color:#818384;font-size:14px;border-top:2px solid #343536;margin:10px 0;';
-    marker.textContent = 'Loading page ' + pageNum + '...';
     var siteTable = document.querySelector('#siteTable');
-    if (siteTable) siteTable.appendChild(marker);
+    // if (siteTable) siteTable.appendChild(marker);
 
     fetch(nextUrl)
       .then(function(r) { return r.text(); })
@@ -943,7 +942,6 @@ app.all('/api/*', async (req, res) => {
         var newNext = doc.querySelector('.next-button a');
 
         if (siteTable && newPosts.length > 0) {
-          marker.textContent = 'Page ' + pageNum;
           newPosts.forEach(function(post) {
             var fullname = post.getAttribute('data-fullname');
             if (fullname && seenPosts.has(fullname)) return;
@@ -1128,7 +1126,7 @@ app.all('/api/*', async (req, res) => {
   /* Votes */
   .arrow.up:hover, .arrow.upmod { color: #ff4500 !important; }
   .arrow.down:hover, .arrow.downmod { color: #7193ff !important; }
-  .rank { color: #818384 !important; }
+  .rank, .midcol .rank, .thing .rank { display: none !important; width: 0 !important; overflow: hidden !important; }
   .score, .score.likes, .score.dislikes, .score.unvoted { color: #818384 !important; }
 
   /* Footer */
@@ -1265,7 +1263,7 @@ app.all('/api/*', async (req, res) => {
   .clearleft + .clearleft { border-color: #343536 !important; }
   .expando { background-color: #272729 !important; border-color: #343536 !important; }
   .selftext, .usertext-edit { background-color: #272729 !important; }
-  .nav-buttons, .nextprev a { color: #4fbcff !important; }
+  .nav-buttons, .nextprev { display: none !important; }
   .flair, .linkflairlabel {
     background-color: #272729 !important;
     color: #d7dadc !important;
@@ -1350,10 +1348,11 @@ app.all('/api/*', async (req, res) => {
   .footer .bottommenu img, #footer img { filter: invert(1) brightness(0.8) !important; }
 
   /* Scrollbar */
-  ::-webkit-scrollbar { width: 12px; }
-  ::-webkit-scrollbar-track { background: #1a1a1b; }
-  ::-webkit-scrollbar-thumb { background: #343536; border-radius: 6px; }
-  ::-webkit-scrollbar-thumb:hover { background: #4a4a4c; }
+  ::-webkit-scrollbar { width: 0px !important; display: none !important; }
+  ::-webkit-scrollbar-track { background: transparent !important; }
+  ::-webkit-scrollbar-thumb { background: transparent !important; }
+  ::-webkit-scrollbar-thumb:hover { background: transparent !important; }
+  body { scrollbar-width: none !important; -ms-overflow-style: none !important; overflow-y: hidden !important; }
 </style>`
 
       html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}`)

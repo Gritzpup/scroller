@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
 
   let isScrolling = false;
-  let scrollSpeed = parseInt(localStorage.getItem('scrollerSpeed'), 10) || 30;
+  let scrollSpeed = parseFloat(localStorage.getItem('scrollerSpeed')) || 30;
   $: localStorage.setItem('scrollerSpeed', scrollSpeed);
   let showControls = false;
   let animFrameId = null;
@@ -15,6 +15,18 @@
     proxyUrl = '/api/';
     checkLoginStatus();
     scheduleAutoRefresh();
+
+    // Listen for messages from the popup (if used)
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'SCROLLER_BOTTOM_REACHED') {
+        console.log('Popup reached bottom. Refreshing...');
+        // For popup, we might want to tell it to reload or just trigger a reload here
+        // If it's the iframe, reloadIframe() works. 
+        // If it's a popup, we might not have a direct way to reload it unless we keep the reference.
+        // But the iframe is the primary use case for this app's main view.
+        reloadIframe();
+      }
+    });
 
     // Auto-resume scrolling if it was active before refresh
     if (localStorage.getItem('scrollerActive') === 'true') {
@@ -55,6 +67,10 @@
     showControls = !showControls;
   }
 
+  let lastScrollY = -1;
+  let bottomReachedTimestamp = null;
+  const BOTTOM_WAIT_TIME = 5000; // 5 seconds
+
   function scrollFrame(timestamp) {
     if (!isScrolling) return;
 
@@ -64,13 +80,54 @@
       if (iframeElement) {
         try {
           const iframeWin = iframeElement.contentWindow;
+          const iframeDoc = iframeElement.contentDocument || iframeWin?.document;
+          
           if (iframeWin) {
             const currentActual = iframeWin.scrollY;
+            
+            // Re-sync if user scrolled manually
             if (Math.abs(currentActual - Math.round(exactScrollY)) > 1) {
               exactScrollY = currentActual;
             }
+            
             exactScrollY += scrollSpeed * delta;
             iframeWin.scrollTo(0, exactScrollY);
+
+            // Check if we've reached the bottom
+            // Using scrollHeight, clientHeight, and scrollY
+            if (iframeDoc) {
+              const scrollHeight = iframeDoc.documentElement.scrollHeight || iframeDoc.body.scrollHeight;
+              const clientHeight = iframeDoc.documentElement.clientHeight || iframeWin.innerHeight;
+              const currentPos = iframeWin.scrollY;
+
+              const isAtBottom = currentPos + clientHeight >= scrollHeight - 5;
+              const isStuck = Math.abs(currentPos - lastScrollY) < 0.1;
+
+              // Only refresh if we hit the bottom AND stopped scrolling for 5 seconds
+              if (isAtBottom && isStuck) {
+                if (currentPos > 100) { // Only count as bottom if we've actually scrolled down a bit
+                  if (!bottomReachedTimestamp) {
+                    bottomReachedTimestamp = Date.now();
+                    console.log('Bottom reached. Waiting 5s before refresh...');
+                  } else if (Date.now() - bottomReachedTimestamp >= BOTTOM_WAIT_TIME) {
+                    console.log('Bottom reached and waited 5s. Refreshing...');
+                    bottomReachedTimestamp = null;
+                    reloadIframe();
+                    lastScrollY = -1;
+                    exactScrollY = 0;
+                    lastTimestamp = timestamp;
+                    animFrameId = requestAnimationFrame(scrollFrame);
+                    return;
+                  }
+                }
+              } else {
+                if (bottomReachedTimestamp) {
+                  console.log('Moved away from bottom or resumed scrolling. Resetting refresh timer.');
+                  bottomReachedTimestamp = null;
+                }
+              }
+              lastScrollY = currentPos;
+            }
           }
         } catch (e) {
           console.log('Cannot scroll iframe:', e.message);
@@ -251,18 +308,26 @@
         </div>
 
         <div class="settings">
-          <label for="speed">
-            Speed: <strong>{scrollSpeed}px/s</strong>
-          </label>
-          <input
-            id="speed"
-            type="range"
-            min="1"
-            max="200"
-            step="5"
-            bind:value={scrollSpeed}
-          />
-          <small>Pixels per second</small>
+                    <label for="speed" class="speed-label">
+                      Speed:
+                      <input
+                        type="number"
+                        class="speed-input"
+                        min="0.1"
+                        max="200"
+                        step="0.1"
+                        bind:value={scrollSpeed}
+                      />
+                      <span>px/s</span>
+                    </label>
+                    <input
+                      id="speed"
+                      type="range"
+                      min="0.1"
+                      max="200"
+                      step="0.1"
+                      bind:value={scrollSpeed}
+                    />          <small>Pixels per second</small>
         </div>
 
         <div class="status">
@@ -480,12 +545,21 @@
     border-bottom: 1px solid #343536;
   }
 
-  .settings label {
-    display: block;
-    font-size: 13px;
-    font-weight: 600;
+  .settings label.speed-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .speed-input {
+    width: 70px;
+    background: #272729;
+    border: 1px solid #343536;
+    border-radius: 4px;
     color: #d7dadc;
-    margin-bottom: 8px;
+    font-weight: 600;
+    padding: 4px 6px;
+    text-align: center;
   }
 
   .settings input[type="range"] {
@@ -496,6 +570,7 @@
     outline: none;
     -webkit-appearance: none;
     cursor: pointer;
+    margin-top: 8px; /* Add some space between input and slider */
   }
 
   .settings input[type="range"]::-webkit-slider-thumb {
