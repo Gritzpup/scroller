@@ -844,8 +844,10 @@ app.all('/api/*', async (req, res) => {
       path = path.substring(PROXY_PREFIX.length) || '/';
     }
     if (SKIP_RE.test(path)) return false;
-    if (path.startsWith('/') && REDDIT_PATH_RE.test(path)) return true;
-    if (path === '/' || path.startsWith('/?')) return true;
+    
+    // Catch-all: If it looks like a relative path, treat it as a Reddit link
+    if (path.startsWith('/')) return true;
+    
     return false;
   }
 
@@ -1352,7 +1354,7 @@ app.all('/api/*', async (req, res) => {
   ::-webkit-scrollbar-track { background: transparent !important; }
   ::-webkit-scrollbar-thumb { background: transparent !important; }
   ::-webkit-scrollbar-thumb:hover { background: transparent !important; }
-  body { scrollbar-width: none !important; -ms-overflow-style: none !important; overflow-y: hidden !important; }
+  body { scrollbar-width: none !important; -ms-overflow-style: none !important; overflow-y: scroll !important; }
 </style>`
 
       html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}`)
