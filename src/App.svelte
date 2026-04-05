@@ -38,6 +38,7 @@
 
   function handleDividerMouseDown() {
     isDragging = true;
+    document.body.classList.add('is-dragging');
   }
 
   function handleMouseMove(e) {
@@ -64,6 +65,7 @@
 
   function handleMouseUp() {
     isDragging = false;
+    document.body.classList.remove('is-dragging');
   }
 
   onMount(() => {
@@ -480,6 +482,7 @@
   }
 
   .pane {
+    flex: 1;
     position: relative;
     overflow: hidden;
     min-width: 0;
@@ -490,6 +493,11 @@
     height: 100%;
     border: none !important;
     display: block !important;
+    pointer-events: auto;
+  }
+
+  :global(body.is-dragging) .content-frame {
+    pointer-events: none;
   }
 
   .divider {
