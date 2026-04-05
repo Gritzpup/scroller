@@ -304,6 +304,8 @@ app.all('/api/*', async (req, res) => {
       });
     };
   </script>
+  <link rel="stylesheet" href="/custom.css">
+  <script src="/custom.js" defer></script>
   <script>
 (function() {
   var PROXY_PREFIX = '';
@@ -397,6 +399,44 @@ app.all('/api/*', async (req, res) => {
     }
   } catch (error) {
     console.error('❌ Proxy error:', error.message);
+    res.status(500).json({ error: 'Proxy error', message: error.message });
+  }
+});
+
+// Direct proxy for Facebook
+app.all('/fb-api/*', async (req, res) => {
+  try {
+    const domain = 'https://m.facebook.com';
+    const fbUrl = `${domain}${req.path.substring('/fb-api'.length)}${req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''}`;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'identity'
+    };
+    const fetchOptions = { method: req.method, headers, redirect: 'follow' };
+    if (req.method !== 'GET' && req.method !== 'HEAD' && Object.keys(req.body).length > 0) {
+      fetchOptions.body = new URLSearchParams(req.body).toString();
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+    const response = await fetch(fbUrl, fetchOptions);
+    const contentType = response.headers.get('content-type');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
+    if (contentType && contentType.includes('text/html')) {
+      let html = await response.text();
+      html = html.replace(/<head[^>]*>/i, `<head><base href="/fb-api/">`);
+      html = html.replace(/https:\/\/m\.facebook\.com/g, '/fb-api');
+      html = html.replace(/https:\/\/www\.facebook\.com/g, '/fb-api');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(html);
+    } else {
+      const buffer = await response.buffer();
+      res.setHeader('Content-Type', contentType || 'application/octet-stream');
+      res.send(buffer);
+    }
+  } catch (error) {
     res.status(500).json({ error: 'Proxy error', message: error.message });
   }
 });

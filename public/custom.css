@@ -1,0 +1,15 @@
+/* Fix for video controls layout */
+._3-6od2t9n54n9kLpZ_z3_n, ._3aQw2JA6Tj-p54aB3T1K_t {
+  display: flex !important;
+  align-items: center !important;
+}
+
+/* Ensure the progress bar is visible */
+._315-g-hD9WLr-iN7L2uD7o {
+  display: block !important;
+  flex-grow: 1;
+}
+
+html { zoom: 1.25; }
+body { font-size: 125% !important; }
+

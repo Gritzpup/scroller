@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PORT = parseInt(process.env.SCROLLER_PORT, 10) || 5177
 const COOKIE_FILE = join(__dirname, `.session-cookies-${PORT}.json`)
+const FB_COOKIE_FILE = join(__dirname, `.fb-session-cookies-${PORT}.json`)
 
 const app = express()
 
@@ -48,6 +49,14 @@ function getSessionCookies(sessionId) {
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
+
+// Global request logger
+app.use((req, res, next) => {
+  if (!req.url.includes('/api/media/') && !req.url.includes('/api/static/')) {
+    console.log(`[REQUEST] ${req.method} ${req.url}`)
+  }
+  next()
+})
 
 // Handle CORS preflight requests
 app.options('*', (req, res) => {
@@ -320,6 +329,182 @@ function extractBraveCookie() {
   const encrypted = Buffer.from(hex, 'hex')
   return decryptChromiumCookie(encrypted)
 }
+
+// ─── Facebook Cookie Store ───────────────────────────────────────────────────
+
+let fbSessionCookies = []
+try {
+  if (existsSync(FB_COOKIE_FILE)) {
+    fbSessionCookies = JSON.parse(readFileSync(FB_COOKIE_FILE, 'utf-8'))
+    console.log(`🍪 [FB] Loaded ${fbSessionCookies.length} persisted Facebook cookies`)
+  }
+} catch (e) {
+  console.log(`⚠️ [FB] Could not load saved Facebook cookies: ${e.message}`)
+}
+
+function saveFbCookies() {
+  try { writeFileSync(FB_COOKIE_FILE, JSON.stringify(fbSessionCookies, null, 2)) } catch (e) {}
+}
+
+// Decrypt a generic Chromium v10 cookie value to a plain string
+function decryptChromiumCookieGeneric(encryptedValue) {
+  const prefix = encryptedValue.slice(0, 3).toString('ascii')
+  if (prefix !== 'v10') {
+    throw new Error(`Unsupported cookie encryption: ${prefix}`)
+  }
+  const encrypted = encryptedValue.slice(3)
+  const key = crypto.pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1')
+  const iv = Buffer.alloc(16, 0x20)
+  const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv)
+  let decrypted = decipher.update(encrypted)
+  decrypted = Buffer.concat([decrypted, decipher.final()])
+  let raw = decrypted.toString('utf-8')
+  // Strip leading null/control bytes from AES-CBC padding
+  let start = 0
+  while (start < raw.length && raw.charCodeAt(start) < 32) start++
+  let end = raw.length
+  while (end > start && raw.charCodeAt(end - 1) < 32) end--
+  return raw.slice(start, end)
+}
+
+// Extract Facebook cookies from the LIVE Brave browser via CDP (port 9222)
+// Works while Brave is running — no SQLite locking, no decryption needed
+async function extractFacebookCookiesViaCDP(cdpPort = 9222) {
+  // Step 1: Get list of page targets and pick one to attach to
+  const tabsRes = await fetch(`http://localhost:${cdpPort}/json`)
+  if (!tabsRes.ok) throw new Error(`CDP not available on port ${cdpPort}`)
+  const tabs = await tabsRes.json()
+
+  // Prefer a non-devtools page target
+  const pageTab = tabs.find(t => t.type === 'page' && t.webSocketDebuggerUrl) ||
+                  tabs.find(t => t.webSocketDebuggerUrl)
+  if (!pageTab) throw new Error('No CDP page target found')
+
+  console.log(`🔌 [FB] Connecting to CDP page: ${pageTab.url} -> ${pageTab.webSocketDebuggerUrl}`)
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(pageTab.webSocketDebuggerUrl)
+    const timeout = setTimeout(() => {
+      ws.close()
+      reject(new Error('CDP WebSocket timed out'))
+    }, 10000)
+
+    ws.addEventListener('open', () => {
+      // Network.getAllCookies works on page targets and returns ALL browser cookies
+      ws.send(JSON.stringify({ id: 1, method: 'Network.getAllCookies', params: {} }))
+    })
+
+    ws.addEventListener('message', (event) => {
+      try {
+        const msg = JSON.parse(event.data)
+        if (msg.id !== 1) return
+        clearTimeout(timeout)
+        ws.close()
+
+        if (msg.error) {
+          return reject(new Error(`CDP error: ${msg.error.message}`))
+        }
+
+        const allCookies = msg.result?.cookies || []
+        console.log(`🍪 [FB] Got ${allCookies.length} total cookies from browser`)
+
+        // Filter to Facebook domains, keep session-critical ones
+        const KEEP = new Set(['c_user', 'xs', 'datr', 'fr', 'sb', 'presence', 'wd', 'dpr'])
+        const fbCookies = allCookies
+          .filter(c => (c.domain || '').includes('facebook.com') && KEEP.has(c.name))
+          .map(c => `${c.name}=${c.value}`)
+
+        console.log(`🍪 [FB] Extracted ${fbCookies.length} FB cookies: ${fbCookies.map(c => c.split('=')[0]).join(', ')}`)
+
+        if (!fbCookies.some(c => c.startsWith('c_user=') || c.startsWith('xs='))) {
+          return reject(new Error('No c_user or xs cookie found — make sure you are logged into Facebook in Brave'))
+        }
+
+        resolve(fbCookies)
+      } catch (e) {
+        clearTimeout(timeout)
+        ws.close()
+        reject(e)
+      }
+    })
+
+    ws.addEventListener('error', (event) => {
+      clearTimeout(timeout)
+      reject(new Error(`CDP WebSocket error: ${event.message || 'connection failed'}`))
+    })
+  })
+}
+
+// Facebook auth: status
+app.get('/fb-auth/status', (req, res) => {
+  const cUser = fbSessionCookies.find(c => c.startsWith('c_user='))
+  if (cUser) {
+    const uid = cUser.split('=')[1]
+    res.json({ loggedIn: true, uid, cookieCount: fbSessionCookies.length })
+  } else {
+    res.json({ loggedIn: false, cookieCount: 0 })
+  }
+})
+
+// Facebook auth: pull cookies from live Brave browser via CDP
+app.get('/fb-auth/pull', async (req, res) => {
+  try {
+    console.log('🔐 [FB] Pulling Facebook cookies from live Brave browser via CDP...')
+    const extracted = await extractFacebookCookiesViaCDP()
+    // Merge into fbSessionCookies
+    for (const cookie of extracted) {
+      const name = cookie.split('=')[0]
+      const idx = fbSessionCookies.findIndex(c => c.split('=')[0] === name)
+      if (idx >= 0) fbSessionCookies[idx] = cookie
+      else fbSessionCookies.push(cookie)
+    }
+    saveFbCookies()
+    const cUser = fbSessionCookies.find(c => c.startsWith('c_user='))
+    const uid = cUser ? cUser.split('=')[1] : null
+    console.log(`✅ [FB] Pulled ${extracted.length} cookies. c_user=${uid}`)
+    res.json({ ok: true, uid, cookieCount: fbSessionCookies.length })
+  } catch (e) {
+    console.error('❌ [FB] CDP cookie pull failed:', e.message)
+    // Fall back to SQLite approach if CDP fails
+    try {
+      console.log('📁 [FB] Falling back to SQLite extraction...')
+      const extracted = extractFacebookCookiesFromBrave_sqlite()
+      for (const cookie of extracted) {
+        const name = cookie.split('=')[0]
+        const idx = fbSessionCookies.findIndex(c => c.split('=')[0] === name)
+        if (idx >= 0) fbSessionCookies[idx] = cookie
+        else fbSessionCookies.push(cookie)
+      }
+      saveFbCookies()
+      const cUser = fbSessionCookies.find(c => c.startsWith('c_user='))
+      const uid = cUser ? cUser.split('=')[1] : null
+      res.json({ ok: true, uid, cookieCount: fbSessionCookies.length, method: 'sqlite' })
+    } catch (e2) {
+      res.json({ ok: false, error: `CDP: ${e.message} | SQLite: ${e2.message}` })
+    }
+  }
+})
+
+// SQLite fallback (kept for when browser is closed or CDP fails)
+function extractFacebookCookiesFromBrave_sqlite() {
+  try {
+    const pythonScript = __dirname + '/extract-brave-cookies.py';
+    const output = execSync(`python3 ${pythonScript}`, { encoding: 'utf-8' }).trim();
+    if (output.startsWith('SUCCESS:')) {
+      const parts = output.replace('SUCCESS:', '').trim().split('; ');
+      const cookies = parts.filter(c => c.trim().length > 0);
+      if (cookies.some(c => c.startsWith('c_user=') || c.startsWith('xs='))) {
+        return cookies;
+      }
+    }
+    throw new Error('Python extraction output was invalid: ' + output);
+  } catch (err) {
+    throw new Error('Could not extract v11 c_user or xs cookies via python: ' + err.message);
+  }
+}
+
+// Facebook auth: status
+
 
 // Stored accounts file (per-port, maps username -> cookies array)
 const ACCOUNTS_FILE = join(__dirname, `.scroller-accounts-${PORT}.json`)
@@ -655,17 +840,29 @@ app.all('/api/media/preview/*', async (req, res) => {
 app.all('/api/*', async (req, res) => {
   try {
     const sessionId = 'default'
-    const pathAfterApi = req.path.substring('/api'.length) || '/'
+    // Ensure we don't have double /api/api
+    let pathAfterApi = req.path.substring('/api'.length) || '/'
+    if (pathAfterApi.startsWith('/api')) {
+      pathAfterApi = pathAfterApi.substring('/api'.length) || '/'
+    }
     const queryString = req.originalUrl.includes('?') ? req.originalUrl.substring(req.originalUrl.indexOf('?')) : ''
     const redditUrl = 'https://old.reddit.com' + pathAfterApi + queryString
 
-    console.log(`📡 Proxying: ${redditUrl}`)
+    console.log(`📡 Proxying: ${redditUrl} (Path: ${pathAfterApi})`)
 
     const headers = {
       'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-      'Referer': 'https://www.reddit.com/',
-      'Accept-Language': 'en-US,en;q=0.9'
+      'Referer': 'https://old.reddit.com/',
+      'Origin': 'https://old.reddit.com'
     }
+
+    // Forward relevant headers from client
+    Object.keys(req.headers).forEach(key => {
+      const lowerKey = key.toLowerCase();
+      if (!['host', 'cookie', 'connection', 'content-length', 'accept-encoding', 'referer', 'origin'].includes(lowerKey)) {
+        headers[key] = req.headers[key];
+      }
+    });
 
     const cookies = getSessionCookies(sessionId)
     if (cookies.length > 0) {
@@ -707,6 +904,7 @@ app.all('/api/*', async (req, res) => {
     }
 
     const response = await fetch(redditUrl, fetchOptions)
+    console.log(`⏪ Response from Reddit: ${response.status} ${response.statusText} for ${pathAfterApi}`)
 
     const contentType = response.headers.get('content-type')
 
@@ -769,18 +967,44 @@ app.all('/api/*', async (req, res) => {
       // Inject override script in head
       const injectScript = `<script>
   function rewriteUrl(url) {
-    if (typeof url !== 'string') return url
-    if (url.startsWith('https://www.reddit.com')) return url.substring('https://www.reddit.com'.length) || '/'
-    if (url.startsWith('https://old.reddit.com')) return url.substring('https://old.reddit.com'.length) || '/'
-    if (url.startsWith('https://reddit.com')) return url.substring('https://reddit.com'.length) || '/'
-    if (url.startsWith('https://www.redditstatic.com')) return '/api/static/' + url.substring('https://www.redditstatic.com/'.length)
-    if (url.startsWith('https://redditstatic.com')) return '/api/static/' + url.substring('https://redditstatic.com/'.length)
-    if (url.startsWith('https://v.redd.it')) return '/api/media/v' + url.substring('https://v.redd.it'.length)
-    if (url.startsWith('https://i.redd.it')) return '/api/media/i' + url.substring('https://i.redd.it'.length)
-    if (url.startsWith('https://preview.redd.it')) return '/api/media/preview' + url.substring('https://preview.redd.it'.length)
-    if (url.startsWith('https://w3-reporting.reddit.com')) return '/api/tracking/w3-reporting' + url.substring('https://w3-reporting.reddit.com'.length)
-    if (url.startsWith('https://error-tracking.reddit.com')) return '/api/tracking/error-tracking' + url.substring('https://error-tracking.reddit.com'.length)
-    return url
+    if (typeof url !== 'string' || url.length === 0 || url.startsWith('data:') || url.startsWith('blob:')) return url
+    
+    // Handle root-relative paths
+    if (url.startsWith('/')) {
+      if (url.startsWith('/api')) return url; // Already prefixed
+      if (!url.startsWith('/@') && !url.startsWith('/src') && !url.startsWith('/node_modules') && !url.startsWith('/popup') && !url.startsWith('/auth')) {
+        return '/api' + url
+      }
+      return url;
+    }
+
+    // Absolute URLs
+    if (url.includes('://') || url.startsWith('//')) {
+      if (url.includes('reddit.com') || url.includes('redditstatic.com') || url.includes('redd.it')) {
+        let path = '';
+        if (url.startsWith('https://www.reddit.com')) path = url.substring(22)
+        else if (url.startsWith('https://old.reddit.com')) path = url.substring(22)
+        else if (url.startsWith('https://reddit.com')) path = url.substring(18)
+        else if (url.startsWith('//www.reddit.com')) path = url.substring(16)
+        else if (url.startsWith('//old.reddit.com')) path = url.substring(16)
+        
+        if (path) return path.startsWith('/api') ? path : '/api' + path;
+
+        if (url.startsWith('https://www.redditstatic.com')) return '/api/static/' + url.substring(28)
+        if (url.startsWith('https://redditstatic.com')) return '/api/static/' + url.substring(24)
+        if (url.startsWith('https://v.redd.it')) return '/api/media/v' + url.substring(17)
+        if (url.startsWith('https://i.redd.it')) return '/api/media/i' + url.substring(17)
+        if (url.startsWith('https://preview.redd.it')) return '/api/media/preview' + url.substring(23)
+      }
+      return url;
+    }
+    
+    // Truly relative URLs (no leading slash, no protocol) - e.g. "expando/..."
+    // We MUST prepend /api/ because the current page is effectively at /api/ (or root)
+    if (window.location.pathname.startsWith('/api')) {
+       return url; // Browser will resolve relative to current /api/... path
+    }
+    return '/api/' + url;
   }
   const OriginalXHR = window.XMLHttpRequest
   window.XMLHttpRequest = function() {
@@ -1247,15 +1471,32 @@ app.all('/api/*', async (req, res) => {
   .media-preview, .media-preview *,
   .media-preview-content, .media-preview-content *,
   .video-player, .video-player *,
-  .reddit-video-player-root, .reddit-video-player-root *,
   [id^="video-"], [id^="video-"] *,
-  [id^="media-preview-"], [id^="media-preview-"] *,
-  .playback-controls, .playback-controls *,
-  .buffering-controls, .buffering-controls *,
-  .ended-controls, .ended-controls *,
-  .interstitial-controls, .interstitial-controls * {
+  [id^="media-preview-"], [id^="media-preview-"] * {
     background-color: transparent !important;
   }
+  
+  /* EXPLICITLY show playback controls and progress bars */
+  .reddit-video-player-root,
+  .playback-controls,
+  .progress-bar, .progress-bar-fill, .progress-bar-bg {
+    background-color: rgba(0,0,0,0.5) !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: block !important;
+  }
+  
+  .progress-bar-fill {
+    background-color: #ff4500 !important;
+    height: 100% !important;
+    display: block !important;
+  }
+
+  /* Fix expando button icons */
+  .expando-button, .expando-button * {
+    background-color: transparent !important;
+  }
+
   .expando .media-preview {
     background-color: #000 !important;
   }
@@ -1357,7 +1598,7 @@ app.all('/api/*', async (req, res) => {
   body { scrollbar-width: none !important; -ms-overflow-style: none !important; overflow-y: scroll !important; }
 </style>`
 
-      html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}`)
+      html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}<link rel="stylesheet" href="/custom.css"><script src="/custom.js" defer></script>`)
       res.send(html)
     } else {
       res.send(buffer)
@@ -1386,6 +1627,344 @@ async function start() {
   })
 
   // Use vite's connect instance as middleware
+// Direct proxy for Facebook — forwards session cookies from Brave extraction
+app.get('/fb-api/sw.js', (req, res) => {
+  const swContent = `
+const PROXY_ORIGIN = self.location.origin;
+const FB_DOMAINS = ['facebook.com', 'fbcdn.net', 'fbsbx.com', 'messenger.com', 'facebook.net'];
+
+function rewriteUrl(url) {
+  if (typeof url !== 'string' || url.startsWith('blob:') || url.startsWith('data:') || url.includes('doubleclick')) return url;
+  
+  let absoluteUrl;
+  try {
+    absoluteUrl = new URL(url, self.location.href).href;
+  } catch (e) { return url; }
+
+  if (FB_DOMAINS.some(d => absoluteUrl.includes(d))) {
+    if (absoluteUrl.startsWith(PROXY_ORIGIN + '/fb-api/') || absoluteUrl.startsWith(PROXY_ORIGIN + '/fb-static/')) {
+      return url;
+    }
+    const isApi = absoluteUrl.includes('facebook.com') || absoluteUrl.includes('fbsbx.com') ||
+                  absoluteUrl.includes('/ajax/') || absoluteUrl.includes('/api/') || 
+                  absoluteUrl.includes('/async/') || absoluteUrl.includes('/bloks');
+    return (isApi ? '/fb-api/' : '/fb-static/') + absoluteUrl;
+  }
+  return url;
+}
+
+self.addEventListener('install', (event) => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('fetch', (event) => {
+  const newUrl = rewriteUrl(event.request.url);
+  if (newUrl !== event.request.url) {
+    const headers = new Headers(event.request.headers);
+    headers.set('X-Proxied-By', 'Antigravity-SW');
+    
+    const requestInit = {
+      method: event.request.method,
+      headers: headers,
+      mode: 'cors',
+      credentials: 'omit', // Proxy server handles session cookies
+      cache: event.request.cache,
+      redirect: 'manual' 
+    };
+
+    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
+      event.respondWith(
+        event.request.clone().arrayBuffer().then(body => {
+          return fetch(newUrl, { ...requestInit, body });
+        })
+      );
+    } else {
+      event.respondWith(fetch(newUrl, requestInit));
+    }
+    return;
+  }
+  event.respondWith(fetch(event.request));
+});
+  `;
+  res.setHeader('Content-Type', 'application/javascript');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.send(swContent);
+});
+
+app.all('/fb-api/*', async (req, res) => {
+  try {
+    const domain = 'https://m.facebook.com';
+    const pathAfterPrefix = req.path.substring('/fb-api'.length) || '/';
+    
+    let fbUrl;
+    // If it starts with /http, it's a full URL passed by our shim
+    if (pathAfterPrefix.startsWith('/http')) {
+      fbUrl = pathAfterPrefix.substring(1) + (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '');
+    } else {
+      // Standard relative path from Facebook Lite
+      fbUrl = `${domain}${pathAfterPrefix}${req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''}`;
+    }
+
+    console.log(`[FB] Proxying: ${fbUrl} (${fbSessionCookies.length} cookies)`);
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'identity',
+      'Referer': 'https://m.facebook.com/'
+    };
+    
+    if (fbSessionCookies.length > 0) {
+      headers['Cookie'] = fbSessionCookies.join('; ');
+    }
+    
+    const fetchOptions = { method: req.method, headers, redirect: 'follow' };
+    if (req.method !== 'GET' && req.method !== 'HEAD' && Object.keys(req.body || {}).length > 0) {
+      fetchOptions.body = new URLSearchParams(req.body).toString();
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+    
+    const response = await fetch(fbUrl, fetchOptions);
+    const contentType = response.headers.get('content-type');
+
+    // Capture cookies
+    const rawCookies = response.headers.raw?.()['set-cookie'] || [];
+    if (rawCookies.length > 0) {
+      for (const cookieHeader of rawCookies) {
+        const pair = cookieHeader.split(';')[0];
+        const name = pair.split('=')[0];
+        const idx = fbSessionCookies.findIndex(c => c.split('=')[0] === name);
+        if (idx >= 0) fbSessionCookies[idx] = pair;
+        else fbSessionCookies.push(pair);
+      }
+      saveFbCookies();
+    }
+
+    for (const [key, value] of response.headers) {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey !== 'content-security-policy' && 
+          lowerKey !== 'x-frame-options' && 
+          lowerKey !== 'report-to' &&
+          lowerKey !== 'content-encoding') {
+        res.setHeader(key, value);
+      }
+    }
+    
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    
+    if (contentType && contentType.includes('text/html')) {
+      let html = await response.text();
+      
+      const proxyShim = `
+<script id="fb-proxy-shim">
+(function() {
+  // Service Worker Registration (Ironclad Proxy)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/fb-api/sw.js', { scope: '/fb-api/' })
+      .then(reg => console.log('🛡️ FB Proxy Service Worker Active', reg.scope))
+      .catch(err => console.error('❌ FB Proxy SW Failed', err));
+  }
+
+  const originalFetch = window.fetch;
+  const originalXHR = window.XMLHttpRequest.prototype.open;
+  const originalSendBeacon = navigator.sendBeacon;
+  
+  function rewriteUrl(url) {
+    if (typeof url !== 'string' || url.startsWith('blob:') || url.startsWith('data:') || url.includes('doubleclick')) return url;
+    
+    let absoluteUrl;
+    try {
+      absoluteUrl = new URL(url, window.location.href).href;
+    } catch (e) { return url; }
+
+    const fbDomains = ['facebook.com', 'fbcdn.net', 'fbsbx.com', 'messenger.com', 'facebook.net', 'z-m-static.xx.fbcdn.net'];
+    if (fbDomains.some(d => absoluteUrl.includes(d))) {
+      if (absoluteUrl.startsWith(window.location.origin + '/fb-api/') || absoluteUrl.startsWith(window.location.origin + '/fb-static/')) {
+        return url;
+      }
+      // Use fb-api proxy for all logging, api, fbsbx and bloks calls
+      const isApi = absoluteUrl.includes('facebook.com') || absoluteUrl.includes('fbsbx.com') ||
+                    absoluteUrl.includes('/ajax/') || absoluteUrl.includes('/api/') || 
+                    absoluteUrl.includes('/async/') || absoluteUrl.includes('/a/bz') || 
+                    absoluteUrl.includes('/bloks');
+      return (isApi ? '/fb-api/' : '/fb-static/') + absoluteUrl;
+    }
+    
+    if (url.startsWith('/') && !url.startsWith('/fb-') && !url.startsWith('/api/') && !url.startsWith('/@vite/')) {
+       return '/fb-api' + url;
+    }
+    return url;
+  }
+
+  window.fetch = function(input, init) {
+    if (typeof input === 'string') {
+      input = rewriteUrl(input);
+    } else if (typeof input === 'object' && input.url) {
+      const newUrl = rewriteUrl(input.url);
+      if (newUrl !== input.url) {
+        try {
+          input = new Request(newUrl, input);
+        } catch (e) { console.debug('FB-Shim: Request rewrite failed', e); }
+      }
+    }
+    return originalFetch.call(this, input, init);
+  };
+
+  window.XMLHttpRequest.prototype.open = function(method, url) {
+    arguments[1] = rewriteUrl(url);
+    return originalXHR.apply(this, arguments);
+  };
+  
+  if (originalSendBeacon) {
+    navigator.sendBeacon = function(url, data) {
+      return originalSendBeacon.call(this, rewriteUrl(url), data);
+    };
+  }
+  
+  try {
+    const ImageOrig = window.Image;
+    window.Image = function() {
+      const img = new ImageOrig(...arguments);
+      const nativeSrcSet = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src').set;
+      Object.defineProperty(img, 'src', {
+        set: function(v) { nativeSrcSet.call(this, rewriteUrl(v)); },
+        get: function() { return this.getAttribute('src'); }
+      });
+      return img;
+    };
+  } catch (e) {}
+  
+  // Patch createElement for dynamic scripts/iframes
+  const origCreateElement = document.createElement;
+  document.createElement = function(tag) {
+    const el = origCreateElement.call(document, tag);
+    const lowTag = tag.toLowerCase();
+    if (lowTag === 'script' || lowTag === 'iframe' || lowTag === 'link' || lowTag === 'img' || lowTag === 'embed') {
+      const originalSetAttribute = el.setAttribute;
+      el.setAttribute = function(name, value) {
+        if (name.toLowerCase() === 'src' || name.toLowerCase() === 'href') value = rewriteUrl(value);
+        return originalSetAttribute.call(this, name, value);
+      };
+      if (typeof el.src !== 'undefined') {
+        Object.defineProperty(el, 'src', {
+          set: function(v) { this.setAttribute('src', v); },
+          get: function() { return this.getAttribute('src'); }
+        });
+      }
+      if (typeof el.href !== 'undefined') {
+        Object.defineProperty(el, 'href', {
+          set: function(v) { this.setAttribute('href', v); },
+          get: function() { return this.getAttribute('href'); }
+        });
+      }
+    }
+    return el;
+  };
+  
+  // Patch Worker for background threads
+  const origWorker = window.Worker;
+  window.Worker = function(url, options) {
+    return new origWorker(rewriteUrl(url), options);
+  };
+  
+  // Intercept link clicks to keep navigation within the proxy
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+    var newHref = rewriteUrl(href);
+    if (newHref !== href) {
+      e.preventDefault();
+      window.location.href = newHref;
+    }
+  }, true);
+
+  console.log('🛡️ FB Proxy Shim Active');
+})();
+</script>
+`;
+
+      html = html.replace(/<head[^>]*>/i, `$&<base href="/fb-api/">${proxyShim}`);
+
+      // More aggressive domain replacement
+      html = html.replace(/https?:\/\/(m|www|graph)\.facebook\.com/g, '/fb-api/https://$1.facebook.com');
+      html = html.replace(/https?:\/\/static\.xx\.fbcdn\.net/g, '/fb-static/https://static.xx.fbcdn.net');
+      html = html.replace(/https?:\/\/[a-z0-9-]+\.xx\.fbcdn\.net/g, (m) => '/fb-static/' + m);
+      html = html.replace(/https?:\/\/(www|m)\.fbsbx\.com/g, '/fb-static/https://$1.fbsbx.com');
+      html = html.replace(/https?:\/\/facebook\.com/g, '/fb-api/https://facebook.com');
+      html = html.replace(/https?:\/\/www\.facebook\.net/g, '/fb-static/https://www.facebook.net');
+      
+      // Handle protocol-relative // in scripts/links (Fixed double-slash)
+      html = html.replace(/"\/\/(m|www|graph|static|z-m-static|static\.xx)\./g, (m) => '"/fb-api/https://' + m.substring(2));
+      
+      // Patch preloads to point to the proxy
+      html = html.replace(/href="https?:\/\/([a-z0-9.-]+\.fbcdn\.net|facebook\.com|fbsbx\.com)/g, (m) => {
+        const url = m.substring(6);
+        const isStatic = url.includes('fbcdn.net') || url.includes('fbsbx.com');
+        return `href="${isStatic ? '/fb-static/' : '/fb-api/'}${url}`;
+      });
+      
+      html = html.replace(/<meta[^>]*Content-Security-Policy[^>]*>/gi, '');
+      
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(html);
+    } else {
+      const buffer = await response.buffer();
+      res.setHeader('Content-Type', contentType || 'application/octet-stream');
+      res.send(buffer);
+    }
+  } catch (error) {
+    console.error('[FB] Proxy error:', error.message);
+    res.status(500).json({ error: 'Proxy error', message: error.message });
+  }
+});
+
+app.all(['/a/*', '/async/*', '/ajax/*', '/bloks/*', '/api/*', '/paid_ads_pixel/*', '/tr/*'], (req, res) => {
+  console.log(`[FB-REDIR] Redirecting misrouted path: ${req.url}`);
+  res.redirect(307, '/fb-api' + req.url);
+});
+
+app.all('/fb-static/*', async (req, res) => {
+  try {
+    const pathAfterPrefix = req.path.substring('/fb-static'.length) || '/';
+    let staticUrl;
+    
+    if (pathAfterPrefix.startsWith('/http')) {
+      staticUrl = pathAfterPrefix.substring(1) + (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '');
+    } else {
+      staticUrl = 'https://static.xx.fbcdn.net' + pathAfterPrefix +
+        (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '');
+    }
+
+    console.log(`[FB-STATIC] Proxying: ${staticUrl}`);
+    const response = await fetch(staticUrl, {
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15',
+        'Referer': 'https://m.facebook.com/'
+      }
+    });
+
+    if (!response.ok) {
+      console.error(`[FB-STATIC] Fetch failed (${response.status}): ${staticUrl}`);
+    }
+
+    const ct = response.headers.get('content-type');
+    res.setHeader('Content-Type', ct || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const buf = await response.buffer();
+    res.send(buf);
+  } catch (e) {
+    console.error(`[FB-STATIC] Proxy error: ${e.message} for ${req.url}`);
+    res.status(500).send('FB static proxy error: ' + e.message);
+  }
+});
+
   app.use(vite.middlewares)
 
   app.listen(PORT, '0.0.0.0', () => {
@@ -1394,3 +1973,4 @@ async function start() {
 }
 
 start()
+
