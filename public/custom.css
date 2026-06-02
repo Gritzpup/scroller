@@ -13,3 +13,7 @@
 html { zoom: 1.25; }
 body { font-size: 125% !important; }
 
+/* Post title should be larger than action buttons */
+.link .title a { font-size: 18px !important; }
+.flat-list li a { font-size: 11px !important; }
+

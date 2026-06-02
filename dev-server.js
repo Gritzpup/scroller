@@ -367,11 +367,28 @@ function decryptChromiumCookieGeneric(encryptedValue) {
   return raw.slice(start, end)
 }
 
-// Extract Facebook cookies from the LIVE Brave browser via CDP (port 9222)
-// Works while Brave is running — no SQLite locking, no decryption needed
-async function extractFacebookCookiesViaCDP(cdpPort = 9222) {
+// Extract Facebook cookies from the LIVE Brave browser via CDP
+// Tries port 9223 (Brave) first, then 9222 (fallback)
+async function extractFacebookCookiesViaCDP(cdpPort, cdpHost) {
+  if (!cdpPort) {
+    // Try Brave's port first, then fallback
+    for (const port of [9223, 9222]) {
+      // Try both IPv4 and IPv6 loopback (Brave may bind to either)
+      for (const host of ['127.0.0.1', '[::1]']) {
+        try {
+          const test = await fetch(`http://${host}:${port}/json`)
+          if (test.ok) {
+            console.log(`🔌 [FB] Found CDP on ${host}:${port}`)
+            return extractFacebookCookiesViaCDP(port, host)
+          }
+        } catch (e) { /* try next */ }
+      }
+    }
+    throw new Error('No CDP available on ports 9222-9223. Launch Brave with --remote-debugging-port=9222')
+  }
+  if (!cdpHost) cdpHost = '127.0.0.1'
   // Step 1: Get list of page targets and pick one to attach to
-  const tabsRes = await fetch(`http://localhost:${cdpPort}/json`)
+  const tabsRes = await fetch(`http://${cdpHost}:${cdpPort}/json`)
   if (!tabsRes.ok) throw new Error(`CDP not available on port ${cdpPort}`)
   const tabs = await tabsRes.json()
 
@@ -451,12 +468,10 @@ app.get('/fb-auth/pull', async (req, res) => {
   try {
     console.log('🔐 [FB] Pulling Facebook cookies from live Brave browser via CDP...')
     const extracted = await extractFacebookCookiesViaCDP()
-    // Merge into fbSessionCookies
+    // Replace all cookies (don't merge - stale cookies cause errors)
+    fbSessionCookies.length = 0
     for (const cookie of extracted) {
-      const name = cookie.split('=')[0]
-      const idx = fbSessionCookies.findIndex(c => c.split('=')[0] === name)
-      if (idx >= 0) fbSessionCookies[idx] = cookie
-      else fbSessionCookies.push(cookie)
+      fbSessionCookies.push(cookie)
     }
     saveFbCookies()
     const cUser = fbSessionCookies.find(c => c.startsWith('c_user='))
@@ -518,6 +533,22 @@ try {
 
 function saveAccounts() {
   try { writeFileSync(ACCOUNTS_FILE, JSON.stringify(storedAccounts, null, 2)) } catch (e) {}
+}
+
+// Hidden posts (per-port) — fullnames the user has hidden, remembered across
+// server restarts AND browser-data clears so they never reappear in the feed.
+const HIDDEN_FILE = join(__dirname, `.hidden-posts-${PORT}.json`)
+let hiddenPosts = []
+try {
+  if (existsSync(HIDDEN_FILE)) {
+    const parsed = JSON.parse(readFileSync(HIDDEN_FILE, 'utf-8'))
+    if (Array.isArray(parsed)) hiddenPosts = parsed
+    console.log(`🙈 Loaded ${hiddenPosts.length} hidden posts`)
+  }
+} catch (e) {}
+
+function saveHiddenPosts() {
+  try { writeFileSync(HIDDEN_FILE, JSON.stringify(hiddenPosts, null, 2)) } catch (e) {}
 }
 
 // Verify cookies against Reddit API and return username
@@ -614,6 +645,279 @@ app.get('/auth/add-account', async (req, res) => {
   } catch (error) {
     res.json({ ok: false, error: error.message })
   }
+})
+
+// Hidden-posts API — the proxied page records hides here so they survive restarts.
+app.get('/scroller/hidden', (req, res) => {
+  res.json({ hidden: hiddenPosts })
+})
+app.post('/scroller/hide', (req, res) => {
+  const fn = req.body && req.body.fullname
+  if (fn && !hiddenPosts.includes(fn)) {
+    hiddenPosts.push(fn)
+    saveHiddenPosts()
+  }
+  res.json({ ok: true, count: hiddenPosts.length })
+})
+app.post('/scroller/unhide', (req, res) => {
+  const fn = req.body && req.body.fullname
+  if (fn) {
+    const idx = hiddenPosts.indexOf(fn)
+    if (idx >= 0) {
+      hiddenPosts.splice(idx, 1)
+      saveHiddenPosts()
+    }
+  }
+  res.json({ ok: true, count: hiddenPosts.length })
+})
+
+// ============================================================
+// Inline comments feature (served as /custom.css + /custom.js, which the proxied
+// page already links in its <head>). Adds a "+ comments" button next to the
+// expand button that opens a scrollable comments panel (beside the video if one
+// is playing). Kept separate from the post's own content-expand button.
+// ============================================================
+app.get('/custom.css', (req, res) => {
+  res.setHeader('Content-Type', 'text/css')
+  res.setHeader('Cache-Control', 'no-store')
+  res.send(`
+  .sco-comments-li { display: flex !important; align-items: flex-end !important; }
+  .sco-comments-btn { cursor: pointer; color: #4fbcff !important; font-weight: 600 !important; white-space: nowrap; }
+  .sco-comments-btn.sco-active { color: #ff4500 !important; }
+
+  .sco-comments-panel {
+    margin: 8px 0 0 0;
+    height: 460px;
+    max-height: 72vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    width: 100%;
+    box-sizing: border-box;
+    background: #131314;
+    border: 1px solid #343536;
+    padding: 8px 12px;
+    scrollbar-width: thin;
+    scrollbar-color: #45474a transparent;
+  }
+  .sco-comments-panel::-webkit-scrollbar { width: 9px !important; display: block !important; }
+  .sco-comments-panel::-webkit-scrollbar-thumb { background: #45474a !important; border-radius: 5px !important; }
+  .sco-comments-panel::-webkit-scrollbar-track { background: transparent !important; }
+  .sco-cmt-status { color: #818384; padding: 14px; font-size: 13px; text-align: center; }
+
+  /* Comments open BESIDE the video when one is playing */
+  .expando.sco-side {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    align-items: flex-start !important;
+    width: 100% !important;
+  }
+  .expando.sco-side > .sco-comments-panel.sco-side-panel {
+    margin: 0 !important;
+    height: 460px !important;
+    max-height: 460px !important;
+    flex: 1 1 auto !important;
+    min-width: 300px !important;
+    overflow-y: auto !important;
+  }
+  /* Ensure the video or media content takes the remaining space */
+  .expando.sco-side > .media-preview,
+  .expando.sco-side > .reddit-video-player-root {
+    flex: 1 1 70% !important;
+    min-width: 0 !important;
+  }
+
+  /* Tidy the fetched comment tree inside the panel */
+  .sco-comments-panel .commentarea,
+  .sco-comments-panel .sitetable { background: transparent !important; margin: 0 !important; }
+  .sco-comments-panel .panestack-title,
+  .sco-comments-panel .menuarea,
+  .sco-comments-panel .commentarea > .infobar,
+  .sco-comments-panel .comment-visits-box { display: none !important; }
+  /* Contain the comment tree's floats so the panel knows its real content height
+     and actually scrolls (otherwise the floated vote columns collapse it). */
+  .sco-comments-panel .commentarea,
+  .sco-comments-panel .sitetable,
+  .sco-comments-panel .nestedlisting,
+  .sco-comments-panel .comment,
+  .sco-comments-panel .comment > .child,
+  .sco-comments-panel .comment > .entry {
+    display: flow-root !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  .sco-comments-panel .comment { margin: 2px 0 !important; }
+  .sco-comments-panel .usertext-body { font-size: 13px !important; }
+  .sco-cmt-more { text-align: center; padding: 10px; color: #818384; font-size: 12px; }
+  `)
+})
+
+app.get('/custom.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript')
+  res.setHeader('Cache-Control', 'no-store')
+  res.send(`
+(function() {
+  'use strict';
+  function api(p){ return (p && p.charAt(0) === '/' && p.indexOf('/api') !== 0) ? '/api' + p : p; }
+
+  function addBtn(thing){
+    if (!thing || thing.getAttribute('data-sco-cmt') === '1') return;
+    var entry = thing.querySelector('.entry');
+    var topMatter = thing.querySelector('.top-matter');
+    var buttons = thing.querySelector('.flat-list.buttons');
+    
+    if (!buttons) {
+      buttons = document.createElement('ul');
+      buttons.className = 'flat-list buttons';
+      if (topMatter) topMatter.appendChild(buttons);
+      else if (entry) entry.appendChild(buttons);
+    }
+    
+    var permalink = thing.getAttribute('data-permalink');
+    if (!buttons || !permalink) return;
+    
+    thing.setAttribute('data-sco-cmt', '1');
+    var li = document.createElement('li');
+    li.className = 'sco-comments-li';
+    var a = document.createElement('a');
+    a.href = 'javascript:void(0)';
+    a.className = 'sco-comments-btn';
+    a.textContent = '+ comments';
+    a.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); toggle(thing, permalink, a); }, true);
+    li.appendChild(a);
+    buttons.insertBefore(li, buttons.firstChild);
+  }
+
+  function toggle(thing, permalink, a){
+    var panel = thing.querySelector('.sco-comments-panel');
+    if (panel){ panel.remove(); a.classList.remove('sco-active'); a.textContent = '+ comments'; unside(thing); return; }
+    a.classList.add('sco-active'); a.textContent = '- comments';
+    panel = document.createElement('div');
+    panel.className = 'sco-comments-panel';
+    panel.innerHTML = '<div class="sco-cmt-status">Loading comments...</div>';
+    place(thing, panel);
+    load(permalink, panel);
+  }
+
+  function place(thing, panel){
+    // If media is expanded (video OR image), open comments BESIDE it on the right.
+    var expando = thing.querySelector('.expando');
+    if (expando && expando.offsetHeight > 40 && expando.querySelector('.reddit-video-player-root, img, video, .media-preview')){
+      expando.classList.add('sco-side'); panel.classList.add('sco-side-panel'); expando.appendChild(panel); return;
+    }
+    var entry = thing.querySelector('.entry');
+    (entry || thing).appendChild(panel);
+  }
+  function unside(thing){ var m = thing.querySelector('.expando.sco-side'); if (m) m.classList.remove('sco-side'); }
+
+  function load(permalink, panel){
+    var url = api(permalink);
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'limit=500';
+    fetch(url).then(function(r){ return r.text(); }).then(function(html){
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var area = doc.querySelector('.commentarea');
+      var listing = area && (area.querySelector('.sitetable.nestedlisting') || area.querySelector('.sitetable'));
+      if (!listing || !listing.querySelector('.comment')){ panel.innerHTML = '<div class="sco-cmt-status">No comments yet.</div>'; return; }
+      panel.innerHTML = '';
+      panel.appendChild(listing);
+      wireLoadMore(panel);
+    }).catch(function(){ panel.innerHTML = '<div class="sco-cmt-status">Could not load comments.</div>'; });
+  }
+
+  // Make Reddit's "load more comments" / "continue this thread" stubs load inline.
+  // The proxied page hijacks normal links, so neutralize the href and handle it here.
+  function wireLoadMore(container){
+    var links = container.querySelectorAll('.morechildren a, .morecomments a, .deepthread a');
+    for (var i = 0; i < links.length; i++){
+      var a = links[i];
+      if (a.getAttribute('data-sco-more')) continue;
+      var href = a.getAttribute('href');
+      var parent = a.closest('.comment[data-permalink]');
+      var path = (href && href.charAt(0) === '/') ? href : (parent ? parent.getAttribute('data-permalink') : null);
+      if (!path) continue;
+      a.setAttribute('data-sco-more', path);
+      a.removeAttribute('data-proxy-href');
+      a.setAttribute('href', 'javascript:void(0)');
+      a.addEventListener('click', loadMoreClick, true);
+    }
+  }
+
+  function loadMoreClick(e){
+    e.preventDefault(); e.stopPropagation();
+    var a = e.currentTarget;
+    var path = a.getAttribute('data-sco-more');
+    var parent = a.closest('.comment[data-permalink]');
+    var panel = a.closest('.sco-comments-panel');
+    var stub = a.closest('.morechildren') || a.closest('.morecomments') || a.closest('.deepthread') || a;
+    if (!path) return;
+    stub.textContent = 'loading...';
+    var u = api(path); u += (u.indexOf('?') >= 0 ? '&' : '?') + 'limit=500';
+    fetch(u).then(function(r){ return r.text(); }).then(function(html){
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var listing = doc.querySelector('.commentarea .sitetable.nestedlisting') || doc.querySelector('.commentarea .sitetable');
+      if (!listing){ stub.textContent = 'no more comments'; return; }
+      if (parent && parent.parentNode){ parent.replaceWith(listing); } else if (stub.parentNode){ stub.replaceWith(listing); }
+      if (panel) wireLoadMore(panel);
+    }).catch(function(){ stub.textContent = 'failed to load'; });
+  }
+
+  // Reddit's native selftext (3-lines) expando fetches through the proxy and gets
+  // the whole page back, so the text never shows. Take it over and load the post
+  // text ourselves from the permalink.
+  function wireSelftext(thing){
+    var btn = thing.querySelector('.expando-button.selftext');
+    if (!btn || btn.getAttribute('data-sco-self')) return;
+    btn.setAttribute('data-sco-self', '1');
+    btn.onclick = null;
+    btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); toggleSelftext(thing, btn); }, true);
+  }
+
+  function toggleSelftext(thing, btn){
+    var exp = thing.querySelector('.expando');
+    if (btn.classList.contains('expanded')){
+      btn.classList.remove('expanded'); btn.classList.add('collapsed');
+      if (exp) exp.style.display = 'none';
+      return;
+    }
+    btn.classList.remove('collapsed'); btn.classList.add('expanded');
+    if (!exp){ exp = document.createElement('div'); exp.className = 'expando'; var entry = thing.querySelector('.entry'); (entry || thing).appendChild(exp); }
+    exp.style.display = 'block';
+    if (exp.getAttribute('data-sco-loaded')) return;
+    exp.innerHTML = '<div class="sco-cmt-status">Loading post text...</div>';
+    var permalink = thing.getAttribute('data-permalink');
+    if (!permalink){ exp.innerHTML = ''; return; }
+    fetch(api(permalink)).then(function(r){ return r.text(); }).then(function(html){
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var body = doc.querySelector('.linklisting .entry .usertext-body') || doc.querySelector('.linklisting .usertext-body') || doc.querySelector('.usertext-body');
+      if (body){ exp.innerHTML = ''; exp.appendChild(body); exp.setAttribute('data-sco-loaded', '1'); }
+      else { exp.innerHTML = '<div class="sco-cmt-status">(this post has no text)</div>'; }
+    }).catch(function(){ exp.innerHTML = '<div class="sco-cmt-status">Could not load post text.</div>'; });
+  }
+
+  function scan(root){ var p = (root || document).querySelectorAll('#siteTable > .thing.link[data-fullname]'); for (var i = 0; i < p.length; i++) { addBtn(p[i]); wireSelftext(p[i]); } }
+
+  function init(){
+    scan();
+    var st = document.querySelector('#siteTable');
+    if (st){
+      var obs = new MutationObserver(function(muts){
+        for (var i = 0; i < muts.length; i++){
+          var ad = muts[i].addedNodes;
+          for (var j = 0; j < ad.length; j++){
+            var n = ad[j];
+            if (n.nodeType !== 1) continue;
+            if (n.matches && n.matches('.thing.link')) addBtn(n);
+            else if (n.querySelectorAll) scan(n);
+          }
+        }
+      });
+      obs.observe(st, { childList: true });
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+  `)
 })
 
 // Dedicated login POST - handles Reddit's redirects properly
@@ -859,7 +1163,11 @@ app.all('/api/*', async (req, res) => {
     // Forward relevant headers from client
     Object.keys(req.headers).forEach(key => {
       const lowerKey = key.toLowerCase();
-      if (!['host', 'cookie', 'connection', 'content-length', 'accept-encoding', 'referer', 'origin'].includes(lowerKey)) {
+      // Also drop conditional-cache headers: on reload the browser sends these,
+      // Reddit replies 304 Not Modified with an EMPTY body, and the proxy would
+      // inject into nothing -> blank/partial white page until a fresh fetch.
+      if (!['host', 'cookie', 'connection', 'content-length', 'accept-encoding', 'referer', 'origin',
+            'if-none-match', 'if-modified-since', 'if-unmodified-since', 'if-match', 'if-range'].includes(lowerKey)) {
         headers[key] = req.headers[key];
       }
     });
@@ -972,7 +1280,7 @@ app.all('/api/*', async (req, res) => {
     // Handle root-relative paths
     if (url.startsWith('/')) {
       if (url.startsWith('/api')) return url; // Already prefixed
-      if (!url.startsWith('/@') && !url.startsWith('/src') && !url.startsWith('/node_modules') && !url.startsWith('/popup') && !url.startsWith('/auth')) {
+      if (!url.startsWith('/@') && !url.startsWith('/src') && !url.startsWith('/node_modules') && !url.startsWith('/popup') && !url.startsWith('/auth') && !url.startsWith('/scroller')) {
         return '/api' + url
       }
       return url;
@@ -1131,6 +1439,90 @@ app.all('/api/*', async (req, res) => {
 </script>
 <script>
 (function() {
+  // --- Persistent "hide" memory ---
+  // Remembers posts the user hides so they stay gone after a refresh.
+  // Two layers of persistence:
+  //   1. The server stores the list in .hidden-posts-<port>.json and injects it
+  //      inline below, so hides survive server restarts and browser-data clears.
+  //   2. localStorage caches it client-side for instant, offline-safe filtering.
+  var HIDDEN_KEY = 'scrollerHiddenPosts';
+  var hidden;
+  try { hidden = new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]')); }
+  catch (e) { hidden = new Set(); }
+  // Server-side list, injected at proxy time (authoritative across restarts).
+  try {
+    var serverHidden = ${JSON.stringify(hiddenPosts)};
+    if (Array.isArray(serverHidden)) serverHidden.forEach(function(fn) { hidden.add(fn); });
+  } catch (e) {}
+
+  function persist() {
+    try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(Array.from(hidden))); } catch (e) {}
+  }
+  function syncServer(path, fn) {
+    // Note: /scroller/* is excluded from the in-page URL rewriter above.
+    try {
+      fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fullname: fn })
+      }).catch(function() {});
+    } catch (e) {}
+  }
+
+  // Shared so the infinite-scroll loader can skip hidden posts as it appends them.
+  window.__scrollerHidden = {
+    has: function(fn) { return hidden.has(fn); },
+    add: function(fn) { if (fn && !hidden.has(fn)) { hidden.add(fn); persist(); syncServer('/scroller/hide', fn); } },
+    remove: function(fn) { if (fn && hidden.delete(fn)) { persist(); syncServer('/scroller/unhide', fn); } }
+  };
+  persist();
+
+  function sweep(root) {
+    if (hidden.size === 0) return;
+    var posts = (root || document).querySelectorAll('#siteTable > .thing[data-fullname]');
+    for (var i = 0; i < posts.length; i++) {
+      if (hidden.has(posts[i].getAttribute('data-fullname'))) posts[i].remove();
+    }
+  }
+
+  // Strip already-hidden posts as the page streams in, so they never flash on screen.
+  var obs = new MutationObserver(function(muts) {
+    if (hidden.size === 0) return;
+    for (var i = 0; i < muts.length; i++) {
+      var added = muts[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType !== 1) continue;
+        if (node.matches && node.matches('.thing[data-fullname]') &&
+            hidden.has(node.getAttribute('data-fullname'))) { node.remove(); continue; }
+        if (node.querySelectorAll) sweep(node);
+      }
+    }
+  });
+  obs.observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener('DOMContentLoaded', function() { sweep(); });
+
+  // Remember when the user clicks Reddit's native hide / unhide links.
+  document.addEventListener('click', function(e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var thing = t.closest('.thing[data-fullname]');
+    if (!thing) return;
+    var fn = thing.getAttribute('data-fullname');
+    if (t.closest('.unhide-button')) {
+      window.__scrollerHidden.remove(fn);
+      return;
+    }
+    if (t.closest('.hide-button')) {
+      window.__scrollerHidden.add(fn);
+      // Defer removal so Reddit's own hide handler can finish first.
+      setTimeout(function() { thing.remove(); }, 0);
+    }
+  }, true);
+})();
+</script>
+<script>
+(function() {
   var loading = false;
   var pageNum = 1;
   var seenPosts = new Set();
@@ -1171,6 +1563,7 @@ app.all('/api/*', async (req, res) => {
           newPosts.forEach(function(post) {
             var fullname = post.getAttribute('data-fullname');
             if (fullname && seenPosts.has(fullname)) return;
+            if (fullname && window.__scrollerHidden && window.__scrollerHidden.has(fullname)) return;
             if (fullname) seenPosts.add(fullname);
             siteTable.appendChild(post);
           });
@@ -1205,6 +1598,8 @@ app.all('/api/*', async (req, res) => {
 </script>`
 
       const nightModeCSS = `<style id="scroller-nightmode">
+  /* Zoom the whole page ~30% bigger (text, posts, media, comments all scale). */
+  body { zoom: 1.3 !important; }
   /* Base */
   html, body, body > .content, #siteTable, .listing-page, .comments-page,
   .search-page, .wiki-page, .other-discussions, .organic-listing {
@@ -1313,9 +1708,181 @@ app.all('/api/*', async (req, res) => {
     border-bottom: 0 !important;
     margin-bottom: 0 !important;
   }
-  #siteTable > .thing + .clearleft + .thing,
-  #siteTable > .thing + .thing {
+  /* Feed post layout. Everything is anchored to the TOP: the title, the vote
+     arrows and the thumbnail all start at the same top line (inline with the
+     picture). The thumbnail still fills the text-panel height via its own
+     align-self: stretch below, and its <img> is absolutely positioned so it does
+     NOT add height to the row (which previously pushed the title/arrows down and
+     left whitespace above them). */
+  #siteTable > .thing.link {
+    display: flex !important;
+    align-items: flex-start !important;
+    padding-top: 12px !important;
+    padding-bottom: 12px !important;
+  }
+  #siteTable > .thing.link > .entry {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    align-self: stretch !important;
+  }
+  /* Tighten the title's line-height and pull its first line up so the title text
+     lines up with the TOP of the photo/video thumbnail (the default leading made
+     the title sit a few px lower, looking uneven with the image). */
+  #siteTable > .thing.link .top-matter > .title {
+    line-height: 1.2 !important;
+    margin-top: -3px !important;
+    margin-bottom: 2px !important;
+  }
+  /* Uniform preview thumbnails: fixed width, filling the text-panel height. Only
+     real image thumbnails (:has(img)), not self/default icons. */
+  #siteTable > .thing.link > .thumbnail:has(img) {
+    position: relative !important;
+    align-self: stretch !important;
+    flex: 0 0 140px !important;
+    width: 140px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 14px 0 0 !important;
+    overflow: hidden !important;
+    border-radius: 0 !important;
+  }
+  #siteTable > .thing.link > .thumbnail:has(img) img {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: cover !important;
+    display: block !important;
+    border-radius: 0 !important;
+  }
+  /* EXPANDED posts (image / video / selftext) OR posts with the comments panel
+     open: the entry becomes tall, so don't center or stretch the left column —
+     anchor the arrows and thumbnail at the top at their normal size. */
+  #siteTable > .thing.link:has(.expando-button.expanded),
+  #siteTable > .thing.link:has(.sco-comments-panel) {
+    align-items: flex-start !important;
+  }
+  #siteTable > .thing.link:has(.expando-button.expanded) > .thumbnail:has(img),
+  #siteTable > .thing.link:has(.sco-comments-panel) > .thumbnail:has(img) {
+    align-self: flex-start !important;
+    height: auto !important;
+    max-height: 160px !important;
+  }
+  #siteTable > .thing.link:has(.expando-button.expanded) > .thumbnail:has(img) img,
+  #siteTable > .thing.link:has(.sco-comments-panel) > .thumbnail:has(img) img {
+    position: static !important;
+    height: auto !important;
+    max-height: 160px !important;
+    object-fit: contain !important;
+  }
+  /* Posts with NO preview image (link / self / nsfw): give the placeholder the
+     same 140px box as real thumbnails so the left column and titles all line up.
+     The reddit sprite icon can't be re-centered inside a large box, so we draw a
+     centered circle + glyph instead. */
+  #siteTable > .thing.link > .thumbnail:not(:has(img)) {
+    position: relative !important;
+    align-self: stretch !important;
+    flex: 0 0 140px !important;
+    width: 140px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 14px 0 0 !important;
+    overflow: hidden !important;
+    border-radius: 0 !important;
+    background-image: none !important;
+    background-color: #1a1a1b !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  #siteTable > .thing.link > .thumbnail:not(:has(img))::after {
+    content: "\\1F517";
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 60px !important;
+    height: 60px !important;
+    border-radius: 50% !important;
+    background-color: #272729 !important;
+    font-size: 26px !important;
+    line-height: 1 !important;
+  }
+  #siteTable > .thing.link > .thumbnail.self:not(:has(img))::after { content: "\\1F4AC" !important; }
+  #siteTable > .thing.link > .thumbnail.nsfw:not(:has(img))::after { content: "\\1F51E" !important; }
+  /* When such a post is expanded (or comments are open), don't let the placeholder
+     box stretch tall. */
+  #siteTable > .thing.link:has(.expando-button.expanded) > .thumbnail:not(:has(img)),
+  #siteTable > .thing.link:has(.sco-comments-panel) > .thumbnail:not(:has(img)) {
+    align-self: flex-start !important;
+    height: 90px !important;
+  }
+  /* Put the expand [+] button at the bottom-left, lined up with the comments row
+     (it used to float up near the top of the post). */
+  #siteTable > .thing.link .entry .top-matter {
+    position: relative !important;
+  }
+  #siteTable > .thing.link .top-matter > .expando-button {
+    position: absolute !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    float: none !important;
+    margin: 0 !important;
+    transform: scale(0.82) !important;   /* sized to sit on the buttons line */
+    transform-origin: bottom left !important;  /* stay anchored at bottom-left */
+  }
+  /* Consistent gap above the buttons row on EVERY post (with or without an expand
+     button) so the comments/share/save/... line sits in the same spot, and the
+     expand button has room and doesn't poke into the "submitted" line. */
+  #siteTable > .thing.link .top-matter > .flat-list.buttons {
+    padding: 0 0 0 30px !important;
+    margin: 12px 0 0 0 !important;
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: flex-end !important;
+    line-height: normal !important;
+  }
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li {
+    display: flex !important;
+    align-items: flex-end !important;
+  }
+  /* Normalize line-height on every button (incl. the hide toggle form, whose
+     larger line-height made "hide" taller and higher than the other buttons). */
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li,
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li * {
+    line-height: normal !important;
+  }
+  /* Make the hide/save toggle wrapper <form>/<span> transparent so their links
+     align EXACTLY like the plain-link buttons (comments/share/report/crosspost). */
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li form,
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li form > span,
+  #siteTable > .thing.link .top-matter > .flat-list.buttons > li form > .option {
+    display: contents !important;
+  }
+  #siteTable > .thing.link > .midcol {
+    margin: 0 10px 0 4px !important;
+    flex: 0 0 auto !important;
+  }
+  /* Enlarge the vote arrows ONLY when media is expanded (so they're proportionate
+     next to a large image/video). In the feed the arrows stay normal size, since a
+     taller arrow column would make short posts taller than their text and leave a
+     gap below the buttons. */
+  #siteTable > .thing.link:has(.expando-button.expanded) > .midcol {
+    zoom: 1.3 !important;
+  }
+  /* Consistent divider above every feed post. Using a plain border on each post
+     (instead of adjacent-sibling selectors) keeps the spacing uniform even
+     across page boundaries (.nav-buttons) and after a hidden post is removed. */
+  #siteTable > .thing.link {
     border-top: 6px solid #343536 !important;
+  }
+  #siteTable > .thing.link:first-child,
+  #siteTable > .clearleft:first-child + .thing.link {
+    border-top: 0 !important;
   }
   .promoted, .promotedlink, .thing.promoted, .thing.promotedlink {
     border: 1px solid #343536 !important;
@@ -1476,21 +2043,57 @@ app.all('/api/*', async (req, res) => {
     background-color: transparent !important;
   }
   
-  /* EXPLICITLY show playback controls and progress bars */
+  /* Show playback controls + progress bar. NOTE: .playback-controls is a
+     horizontal flex row -- the previous 'display: block' here stacked the play
+     button, time and progress bar into a vertical column. Keep it as a row. */
   .reddit-video-player-root,
-  .playback-controls,
   .progress-bar, .progress-bar-fill, .progress-bar-bg {
     background-color: rgba(0,0,0,0.5) !important;
     opacity: 1 !important;
     visibility: visible !important;
     display: block !important;
   }
-  
+  .playback-controls {
+    background-color: rgba(0,0,0,0.5) !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+  }
+  /* Keep each control icon on the line (don't let them wrap or grow). */
+  .playback-controls > * {
+    flex: 0 0 auto !important;
+    align-self: center !important;
+  }
+  .playback-controls > .reddit-video-seek-bar-root {
+    flex: 1 1 auto !important;
+  }
+  .progress-bar {
+    flex: 1 1 auto !important;
+  }
+
   .progress-bar-fill {
     background-color: #ff4500 !important;
     height: 100% !important;
     display: block !important;
   }
+
+  /* The blanket "transparent background" rule above also wiped the colours of
+     reddit's actual video seek bar (.reddit-video-seek-bar-root), which is why
+     no progress bar was visible. Restore them so the scrubber shows. */
+  .reddit-video-seek-bar-root .seek-bar-bar.seek-bar-background { background-color: rgba(255,255,255,0.3) !important; }
+  .reddit-video-seek-bar-root .seek-bar-bar.seek-bar-buffered   { background-color: rgba(255,255,255,0.5) !important; }
+  .reddit-video-seek-bar-root .seek-bar-bar.seek-bar-lookahead  { background-color: rgba(255,69,0,0.4) !important; }
+  .reddit-video-seek-bar-root .seek-bar-bar.seek-bar-progress   { background-color: #ff4500 !important; }
+  .reddit-video-seek-bar-root .seek-bar-thumb                   { background-color: #ff4500 !important; }
+  /* Make the bar a touch taller so it reads as a real progress bar. */
+  .reddit-video-seek-bar-root .seek-bar-bar { height: 6px !important; }
+  /* Volume slider got hit by the same rule. */
+  .reddit-video-volume-slider-root .volume-slider-track    { background-color: rgba(255,255,255,0.3) !important; }
+  .reddit-video-volume-slider-root .volume-slider-progress { background-color: #ff4500 !important; }
+  .reddit-video-volume-slider-root .volume-slider-thumb    { background-color: #ffffff !important; }
 
   /* Fix expando button icons */
   .expando-button, .expando-button * {
@@ -1599,6 +2202,8 @@ app.all('/api/*', async (req, res) => {
 </style>`
 
       html = html.replace(/<head[^>]*>/i, `<head>${injectScript}${nightModeCSS}<link rel="stylesheet" href="/custom.css"><script src="/custom.js" defer></script>`)
+      // Never cache the proxied page, so a reload always re-fetches full content.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
       res.send(html)
     } else {
       res.send(buffer)
@@ -1712,15 +2317,15 @@ app.all('/fb-api/*', async (req, res) => {
     console.log(`[FB] Proxying: ${fbUrl} (${fbSessionCookies.length} cookies)`);
     const headers = {
       'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'identity',
-      'Referer': 'https://m.facebook.com/'
+      'Accept-Encoding': 'identity'
     };
-    
+
     if (fbSessionCookies.length > 0) {
       headers['Cookie'] = fbSessionCookies.join('; ');
     }
-    
+
     const fetchOptions = { method: req.method, headers, redirect: 'follow' };
     if (req.method !== 'GET' && req.method !== 'HEAD' && Object.keys(req.body || {}).length > 0) {
       fetchOptions.body = new URLSearchParams(req.body).toString();
@@ -1799,6 +2404,29 @@ app.all('/fb-api/*', async (req, res) => {
     }
     return url;
   }
+
+  // Intercept ALL navigation to keep within proxy
+  try {
+    // Intercept location.href = "..."
+    var origHrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+    if (origHrefDesc && origHrefDesc.set) {
+      Object.defineProperty(Location.prototype, 'href', {
+        set: function(v) { origHrefDesc.set.call(this, rewriteUrl(v)); },
+        get: origHrefDesc.get,
+        configurable: true
+      });
+    }
+    // Intercept location.assign() and location.replace()
+    var origAssign = Location.prototype.assign;
+    var origReplace = Location.prototype.replace;
+    Location.prototype.assign = function(url) { return origAssign.call(this, rewriteUrl(url)); };
+    Location.prototype.replace = function(url) { return origReplace.call(this, rewriteUrl(url)); };
+    // Intercept history.pushState/replaceState
+    var origPushState = history.pushState;
+    var origReplaceState = history.replaceState;
+    history.pushState = function(s, t, url) { return origPushState.call(this, s, t, url ? rewriteUrl(url) : url); };
+    history.replaceState = function(s, t, url) { return origReplaceState.call(this, s, t, url ? rewriteUrl(url) : url); };
+  } catch(e) { console.debug('FB-Shim: location intercept failed', e); }
 
   window.fetch = function(input, init) {
     if (typeof input === 'string') {
@@ -1889,10 +2517,45 @@ app.all('/fb-api/*', async (req, res) => {
 </script>
 `;
 
-      html = html.replace(/<head[^>]*>/i, `$&<base href="/fb-api/">${proxyShim}`);
+      // Inject location-blocking shim BEFORE any other scripts
+      const locationBlocker = `<script>
+// Block Facebook's domain-check redirect by freezing navigation
+(function() {
+  var _origHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+  if (_origHref && _origHref.set) {
+    Object.defineProperty(Location.prototype, 'href', {
+      set: function(v) {
+        if (typeof v === 'string' && (v === '/' || v === window.location.origin + '/')) {
+          console.log('[FB-Block] Blocked redirect to:', v);
+          return;
+        }
+        if (typeof v === 'string' && !v.includes('/fb-api') && !v.includes('/fb-static') && v.startsWith('/')) {
+          v = '/fb-api' + v;
+        }
+        _origHref.set.call(this, v);
+      },
+      get: _origHref.get,
+      configurable: true
+    });
+  }
+  var _origAssign = Location.prototype.assign;
+  Location.prototype.assign = function(u) {
+    if (u === '/' || u === window.location.origin + '/') { console.log('[FB-Block] Blocked assign to:', u); return; }
+    if (typeof u === 'string' && !u.includes('/fb-api') && !u.includes('/fb-static') && u.startsWith('/')) u = '/fb-api' + u;
+    return _origAssign.call(this, u);
+  };
+  var _origReplace = Location.prototype.replace;
+  Location.prototype.replace = function(u) {
+    if (u === '/' || u === window.location.origin + '/') { console.log('[FB-Block] Blocked replace to:', u); return; }
+    if (typeof u === 'string' && !u.includes('/fb-api') && !u.includes('/fb-static') && u.startsWith('/')) u = '/fb-api' + u;
+    return _origReplace.call(this, u);
+  };
+})();
+</script>`;
+      html = html.replace(/<head[^>]*>/i, `$&${locationBlocker}<base href="/fb-api/">`);
 
       // More aggressive domain replacement
-      html = html.replace(/https?:\/\/(m|www|graph)\.facebook\.com/g, '/fb-api/https://$1.facebook.com');
+      html = html.replace(/https?:\/\/(mbasic|m|www|graph)\.facebook\.com/g, '/fb-api/https://$1.facebook.com');
       html = html.replace(/https?:\/\/static\.xx\.fbcdn\.net/g, '/fb-static/https://static.xx.fbcdn.net');
       html = html.replace(/https?:\/\/[a-z0-9-]+\.xx\.fbcdn\.net/g, (m) => '/fb-static/' + m);
       html = html.replace(/https?:\/\/(www|m)\.fbsbx\.com/g, '/fb-static/https://$1.fbsbx.com');
@@ -1910,7 +2573,7 @@ app.all('/fb-api/*', async (req, res) => {
       });
       
       html = html.replace(/<meta[^>]*Content-Security-Policy[^>]*>/gi, '');
-      
+
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);
     } else {

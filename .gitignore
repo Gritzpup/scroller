@@ -10,6 +10,8 @@ lerna-debug.log*
 # User-specific files
 .session-cookies-*.json
 .scroller-accounts-*.json
+.fb-session-cookies-*.json
+.hidden-posts-*.json
 
 .session-cookies.json
 node_modules
