@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer as createViteServer } from 'vite'
 import fetch from 'node-fetch'
 import crypto from 'crypto'
-import { execSync } from 'child_process'
+import { execSync, execFile } from 'child_process'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
@@ -895,7 +895,52 @@ app.get('/custom.js', (req, res) => {
     }).catch(function(){ exp.innerHTML = '<div class="sco-cmt-status">Could not load post text.</div>'; });
   }
 
-  function scan(root){ var p = (root || document).querySelectorAll('#siteTable > .thing.link[data-fullname]'); for (var i = 0; i < p.length; i++) { addBtn(p[i]); wireSelftext(p[i]); } }
+  // YouTube posts: the native embed shows "Sign in to confirm you're not a bot",
+  // so play it as a native <video> from /yt (server extracts the real stream).
+  function clean(s){ if(!s) return null; s = s.split('&')[0].split('?')[0].split('/')[0].split('#')[0]; return /^[\\w-]{6,20}$/.test(s) ? s : null; }
+  function ytId(thing){
+    var u = thing.getAttribute('data-url') || ((thing.querySelector('a.title')||{}).href) || '';
+    if (u.indexOf('youtu.be/') >= 0) return clean(u.split('youtu.be/')[1]);
+    if (u.indexOf('watch?v=') >= 0) return clean(u.split('watch?v=')[1]);
+    if (u.indexOf('/embed/') >= 0) return clean(u.split('/embed/')[1]);
+    if (u.indexOf('/shorts/') >= 0) return clean(u.split('/shorts/')[1]);
+    if (u.indexOf('/live/') >= 0) return clean(u.split('/live/')[1]);
+    return null;
+  }
+  function wireYouTube(thing){
+    var id = ytId(thing);
+    if (!id) return;
+    var btn = thing.querySelector('.expando-button.video');
+    if (!btn || btn.getAttribute('data-sco-yt')) return;
+    btn.setAttribute('data-sco-yt', '1');
+    btn.onclick = null;
+    btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); toggleYouTube(thing, btn, id); }, true);
+  }
+  function toggleYouTube(thing, btn, id){
+    var exp = thing.querySelector('.expando');
+    if (btn.classList.contains('expanded')){
+      btn.classList.remove('expanded'); btn.classList.add('collapsed');
+      if (exp){ exp.style.display = 'none'; var pv = exp.querySelector('video'); if (pv) try { pv.pause(); } catch(e){} }
+      return;
+    }
+    btn.classList.remove('collapsed'); btn.classList.add('expanded');
+    if (!exp){ exp = document.createElement('div'); exp.className = 'expando'; var entry = thing.querySelector('.entry'); (entry || thing).appendChild(exp); }
+    exp.style.display = 'block';
+    if (!exp.getAttribute('data-sco-yt-loaded')){
+      exp.setAttribute('data-sco-yt-loaded', '1');
+      exp.innerHTML = '<div class="media-preview" style="background:#000;"><video class="sco-yt" controls playsinline autoplay preload="auto" style="width:100%;max-height:72vh;display:block;background:#000;" src="/yt?v=' + id + '"></video><div class="sco-cmt-status sco-yt-msg">Loading video...</div></div>';
+      var vid = exp.querySelector('video');
+      var msg = exp.querySelector('.sco-yt-msg');
+      if (vid){
+        var startPlay = function(){ if (msg) msg.style.display = 'none'; try { var p = vid.play(); if (p && p.catch) p.catch(function(){}); } catch(e){} };
+        vid.addEventListener('loadeddata', startPlay);
+        vid.addEventListener('canplay', startPlay);
+        vid.addEventListener('error', function(){ if (msg) msg.textContent = 'Could not load this video.'; });
+      }
+    }
+  }
+
+  function scan(root){ var p = (root || document).querySelectorAll('#siteTable > .thing.link[data-fullname]'); for (var i = 0; i < p.length; i++) { addBtn(p[i]); wireSelftext(p[i]); wireYouTube(p[i]); } }
 
   function init(){
     scan();
@@ -918,6 +963,37 @@ app.get('/custom.js', (req, res) => {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
   `)
+})
+
+// ============================================================
+// YouTube playback: native <video> instead of the broken embed (the embed shows
+// "Sign in to confirm you're not a bot" because it can't use the browser's YouTube
+// session). The server extracts the direct progressive MP4 with yt-dlp (using the
+// logged-in browser's cookies + deno for YouTube's challenge) and 302s to it; the
+// <video> plays it directly (same public IP, no CORS, no embed wall).
+// ============================================================
+const YT_DLP = join(__dirname, 'yt-dlp')
+const YT_ENV = { ...process.env, PATH: '/home/ubuntubox2/.local/bin:' + (process.env.PATH || '') }
+const ytCache = new Map()
+app.get('/yt', (req, res) => {
+  const v = String(req.query.v || '')
+  if (!/^[\w-]{6,20}$/.test(v)) return res.status(400).send('bad video id')
+  const hit = ytCache.get(v)
+  if (hit && Date.now() - hit.ts < 60 * 60 * 1000) return res.redirect(hit.url)
+  execFile(YT_DLP, [
+    '--cookies-from-browser', 'chromium:/home/ubuntubox2/.hermes/chrome-debug',
+    '--no-warnings', '-f', '18/22/best[protocol^=http][vcodec!=none][acodec!=none]',
+    '-g', 'https://www.youtube.com/watch?v=' + v
+  ], { env: YT_ENV, timeout: 90000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const url = String(stdout || '').trim().split('\n')[0]
+    if (err || !url.startsWith('http')) {
+      console.error('❌ yt-dlp failed for', v, ':', (stderr || (err && err.message) || '').slice(0, 300))
+      return res.status(502).send('Could not extract video')
+    }
+    console.log('▶️ youtube', v, '->', url.slice(0, 70))
+    ytCache.set(v, { url, ts: Date.now() })
+    res.redirect(url)
+  })
 })
 
 // Dedicated login POST - handles Reddit's redirects properly
@@ -1802,6 +1878,10 @@ app.all('/api/*', async (req, res) => {
   }
   #siteTable > .thing.link > .thumbnail:not(:has(img))::after {
     content: "\\1F517";
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;

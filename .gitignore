@@ -15,6 +15,7 @@ lerna-debug.log*
 
 .session-cookies.json
 node_modules
+yt-dlp
 dist
 dist-ssr
 *.local
