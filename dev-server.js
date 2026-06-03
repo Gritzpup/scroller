@@ -671,6 +671,40 @@ app.post('/scroller/unhide', (req, res) => {
   res.json({ ok: true, count: hiddenPosts.length })
 })
 
+// Post a comment/reply to Reddit. The /api/* proxy mangles Reddit's /api/ POST
+// paths (double-strips), so do it here directly with the stored cookies. The
+// modhash (CSRF token) is fetched from /api/me.json and cached.
+let cachedModhash = { uh: null, ts: 0 }
+async function getModhash(cookies) {
+  if (cachedModhash.uh && Date.now() - cachedModhash.ts < 10 * 60 * 1000) return cachedModhash.uh
+  try {
+    const r = await fetch('https://old.reddit.com/api/me.json', { headers: { 'Cookie': cookies.join('; '), 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36' } })
+    const j = await r.json()
+    const uh = j && j.data && j.data.modhash
+    if (uh) { cachedModhash = { uh, ts: Date.now() }; return uh }
+  } catch (e) {}
+  return null
+}
+app.post('/scroller/comment', async (req, res) => {
+  try {
+    const thing_id = req.body && req.body.thing_id
+    const text = req.body && req.body.text
+    if (!thing_id || !text) return res.json({ ok: false, error: 'missing thing_id or text' })
+    const cookies = getSessionCookies('default')
+    if (!cookies.length) return res.json({ ok: false, error: 'not logged in' })
+    const uh = await getModhash(cookies)
+    if (!uh) return res.json({ ok: false, error: 'not logged in (no modhash)' })
+    const body = new URLSearchParams({ thing_id, text, uh, api_type: 'json' }).toString()
+    const r = await fetch('https://old.reddit.com/api/comment', {
+      method: 'POST',
+      headers: { 'Cookie': cookies.join('; '), 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36', 'Referer': 'https://old.reddit.com/', 'Origin': 'https://old.reddit.com' },
+      body
+    })
+    const j = await r.json()
+    res.json(j)
+  } catch (e) { res.json({ ok: false, error: String((e && e.message) || e) }) }
+})
+
 // ============================================================
 // Inline comments feature (served as /custom.css + /custom.js, which the proxied
 // page already links in its <head>). Adds a "+ comments" button next to the
@@ -749,6 +783,13 @@ app.get('/custom.css', (req, res) => {
   .sco-comments-panel .comment { margin: 2px 0 !important; }
   .sco-comments-panel .usertext-body { font-size: 13px !important; }
   .sco-cmt-more { text-align: center; padding: 10px; color: #818384; font-size: 12px; }
+  /* Inline reply box */
+  .sco-replybox { margin: 6px 0 8px 0; }
+  .sco-replybox .sco-reply-ta { width: 100%; box-sizing: border-box; background: #1a1a1b; color: #d7dadc; border: 1px solid #45474a; border-radius: 4px; padding: 6px 8px; font: inherit; resize: vertical; }
+  .sco-replybox .sco-reply-row { margin-top: 5px; display: flex; gap: 8px; align-items: center; }
+  .sco-replybox button { background: #272729; color: #d7dadc; border: 1px solid #45474a; border-radius: 4px; padding: 3px 14px; cursor: pointer; font: inherit; }
+  .sco-replybox .sco-send { background: #4fbcff; color: #03263b; border-color: #4fbcff; font-weight: 700; }
+  .sco-replybox .sco-reply-status { color: #818384; font-size: 12px; }
   `)
 })
 
@@ -835,8 +876,68 @@ app.get('/custom.js', (req, res) => {
       if (!listing || !listing.querySelector('.comment')){ panel.innerHTML = '<div class="sco-cmt-status">No comments yet.</div>'; return; }
       panel.innerHTML = '';
       panel.appendChild(listing);
+      stripOnclick(panel);
       wireLoadMore(panel);
+      wireReplies(panel);
     }).catch(function(){ panel.innerHTML = '<div class="sco-cmt-status">Could not load comments.</div>'; });
+  }
+
+  // Reddit's comment onclick handlers (reply/vote/...) reference JS we don't load,
+  // so strip them to avoid console errors; we handle reply ourselves.
+  function stripOnclick(root){ var els = root.querySelectorAll('[onclick]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('onclick'); }
+  function decodeHTML(s){ var t = document.createElement('textarea'); t.innerHTML = s; return t.value; }
+
+  function wireReplies(panel){
+    if (panel.getAttribute('data-sco-replies')) return;
+    panel.setAttribute('data-sco-replies', '1');
+    panel.addEventListener('click', function(e){
+      var a = e.target.closest && e.target.closest('a');
+      if (!a || !panel.contains(a)) return;
+      if ((a.textContent || '').trim().toLowerCase() === 'reply'){
+        e.preventDefault(); e.stopPropagation();
+        var c = a.closest('.comment[data-fullname]');
+        if (c) showReplyBox(c);
+      }
+    }, true);
+  }
+
+  function showReplyBox(comment){
+    var entry = comment.querySelector(':scope > .entry') || comment;
+    var existing = entry.querySelector(':scope > .sco-replybox');
+    if (existing){ existing.querySelector('textarea').focus(); return; }
+    var box = document.createElement('div'); box.className = 'sco-replybox';
+    box.innerHTML = '<textarea class="sco-reply-ta" rows="3" placeholder="reply  (Enter to send, Shift+Enter for newline)"></textarea><div class="sco-reply-row"><button type="button" class="sco-send">Send</button><button type="button" class="sco-cancel">Cancel</button><span class="sco-reply-status"></span></div>';
+    entry.appendChild(box);
+    var ta = box.querySelector('textarea'); ta.focus();
+    box.querySelector('.sco-cancel').addEventListener('click', function(){ box.remove(); });
+    box.querySelector('.sco-send').addEventListener('click', function(){ sendReply(comment, box); });
+    ta.addEventListener('keydown', function(e){ if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendReply(comment, box); } });
+  }
+
+  function sendReply(comment, box){
+    var ta = box.querySelector('textarea'); var text = ta.value;
+    if (!text.trim()) return;
+    var fullname = comment.getAttribute('data-fullname');
+    var status = box.querySelector('.sco-reply-status'); var btn = box.querySelector('.sco-send');
+    status.textContent = 'sending...'; btn.disabled = true;
+    fetch('/scroller/comment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thing_id: fullname, text: text }) })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var errs = j && j.json && j.json.errors;
+        if (errs && errs.length){ status.textContent = 'error: ' + errs[0].join(' '); btn.disabled = false; return; }
+        if (j && j.ok === false){ status.textContent = 'error: ' + (j.error || 'failed'); btn.disabled = false; return; }
+        var things = j && j.json && j.json.data && j.json.data.things;
+        if (things && things[0] && things[0].data && things[0].data.contentHTML){
+          var tmp = document.createElement('div'); tmp.innerHTML = decodeHTML(things[0].data.contentHTML);
+          stripOnclick(tmp);
+          var child = comment.querySelector(':scope > .child');
+          if (!child){ child = document.createElement('div'); child.className = 'child'; comment.appendChild(child); }
+          var listing = child.querySelector('.sitetable'); if (!listing){ listing = document.createElement('div'); listing.className = 'sitetable'; child.appendChild(listing); }
+          while (tmp.firstChild) listing.insertBefore(tmp.firstChild, listing.firstChild);
+          box.remove();
+        } else { status.textContent = 'posted'; setTimeout(function(){ box.remove(); }, 700); }
+      })
+      .catch(function(){ status.textContent = 'failed to send'; btn.disabled = false; });
   }
 
   // Make Reddit's "load more comments" / "continue this thread" stubs load inline.
@@ -871,6 +972,7 @@ app.get('/custom.js', (req, res) => {
       var doc = new DOMParser().parseFromString(html, 'text/html');
       var listing = doc.querySelector('.commentarea .sitetable.nestedlisting') || doc.querySelector('.commentarea .sitetable');
       if (!listing){ stub.textContent = 'no more comments'; return; }
+      stripOnclick(listing);
       if (parent && parent.parentNode){ parent.replaceWith(listing); } else if (stub.parentNode){ stub.replaceWith(listing); }
       if (panel) wireLoadMore(panel);
     }).catch(function(){ stub.textContent = 'failed to load'; });
