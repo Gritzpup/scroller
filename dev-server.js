@@ -671,37 +671,74 @@ app.post('/scroller/unhide', (req, res) => {
   res.json({ ok: true, count: hiddenPosts.length })
 })
 
-// Post a comment/reply to Reddit. The /api/* proxy mangles Reddit's /api/ POST
-// paths (double-strips), so do it here directly with the stored cookies. The
-// modhash (CSRF token) is fetched from /api/me.json and cached.
-let cachedModhash = { uh: null, ts: 0 }
-async function getModhash(cookies) {
-  if (cachedModhash.uh && Date.now() - cachedModhash.ts < 10 * 60 * 1000) return cachedModhash.uh
+// Reddit write actions (comment/edit/delete) + identity. The /api/* proxy mangles
+// Reddit's /api/ POST paths (double-strips), so do them here directly with the
+// stored cookies + modhash. /api/me.json gives the modhash (CSRF) AND the username.
+const RUA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+let cachedMe = { uh: null, name: null, ts: 0 }
+async function getMe(cookies) {
+  if (cachedMe.uh && Date.now() - cachedMe.ts < 10 * 60 * 1000) return cachedMe
   try {
-    const r = await fetch('https://old.reddit.com/api/me.json', { headers: { 'Cookie': cookies.join('; '), 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36' } })
-    const j = await r.json()
-    const uh = j && j.data && j.data.modhash
-    if (uh) { cachedModhash = { uh, ts: Date.now() }; return uh }
+    const r = await fetch('https://old.reddit.com/api/me.json', { headers: { 'Cookie': cookies.join('; '), 'User-Agent': RUA } })
+    const d = (await r.json()).data
+    if (d && d.modhash) cachedMe = { uh: d.modhash, name: d.name || null, ts: Date.now() }
   } catch (e) {}
-  return null
+  return cachedMe
 }
+async function redditPost(path, params, cookies) {
+  const r = await fetch('https://old.reddit.com' + path, {
+    method: 'POST',
+    headers: { 'Cookie': cookies.join('; '), 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': RUA, 'Referer': 'https://old.reddit.com/', 'Origin': 'https://old.reddit.com' },
+    body: new URLSearchParams(params).toString()
+  })
+  return r.json()
+}
+
+app.get('/scroller/me', async (req, res) => {
+  const me = await getMe(getSessionCookies('default'))
+  res.json({ name: me.name || null })
+})
+
 app.post('/scroller/comment', async (req, res) => {
   try {
-    const thing_id = req.body && req.body.thing_id
-    const text = req.body && req.body.text
+    const { thing_id, text } = req.body || {}
     if (!thing_id || !text) return res.json({ ok: false, error: 'missing thing_id or text' })
+    const cookies = getSessionCookies('default'); if (!cookies.length) return res.json({ ok: false, error: 'not logged in' })
+    const me = await getMe(cookies); if (!me.uh) return res.json({ ok: false, error: 'not logged in (no modhash)' })
+    res.json(await redditPost('/api/comment', { thing_id, text, uh: me.uh, api_type: 'json' }, cookies))
+  } catch (e) { res.json({ ok: false, error: String((e && e.message) || e) }) }
+})
+
+app.post('/scroller/edit', async (req, res) => {
+  try {
+    const { thing_id, text } = req.body || {}
+    if (!thing_id || !text) return res.json({ ok: false, error: 'missing thing_id or text' })
+    const cookies = getSessionCookies('default'); if (!cookies.length) return res.json({ ok: false, error: 'not logged in' })
+    const me = await getMe(cookies); if (!me.uh) return res.json({ ok: false, error: 'not logged in' })
+    res.json(await redditPost('/api/editusertext', { thing_id, text, uh: me.uh, api_type: 'json' }, cookies))
+  } catch (e) { res.json({ ok: false, error: String((e && e.message) || e) }) }
+})
+
+app.post('/scroller/del', async (req, res) => {
+  try {
+    const id = req.body && req.body.id
+    if (!id) return res.json({ ok: false, error: 'missing id' })
+    const cookies = getSessionCookies('default'); if (!cookies.length) return res.json({ ok: false, error: 'not logged in' })
+    const me = await getMe(cookies); if (!me.uh) return res.json({ ok: false, error: 'not logged in' })
+    await redditPost('/api/del', { id, uh: me.uh }, cookies)
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: String((e && e.message) || e) }) }
+})
+
+// Raw markdown of a comment (for the edit box).
+app.get('/scroller/raw', async (req, res) => {
+  try {
+    const id = String(req.query.id || '')
+    if (!/^t1_[A-Za-z0-9]+$/.test(id)) return res.json({ ok: false, error: 'bad id' })
     const cookies = getSessionCookies('default')
-    if (!cookies.length) return res.json({ ok: false, error: 'not logged in' })
-    const uh = await getModhash(cookies)
-    if (!uh) return res.json({ ok: false, error: 'not logged in (no modhash)' })
-    const body = new URLSearchParams({ thing_id, text, uh, api_type: 'json' }).toString()
-    const r = await fetch('https://old.reddit.com/api/comment', {
-      method: 'POST',
-      headers: { 'Cookie': cookies.join('; '), 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36', 'Referer': 'https://old.reddit.com/', 'Origin': 'https://old.reddit.com' },
-      body
-    })
-    const j = await r.json()
-    res.json(j)
+    const r = await fetch('https://old.reddit.com/api/info.json?id=' + id, { headers: { 'Cookie': cookies.join('; '), 'User-Agent': RUA } })
+    const c = ((await r.json()).data || {}).children
+    res.json({ ok: true, body: (c && c[0] && c[0].data && c[0].data.body) || '' })
   } catch (e) { res.json({ ok: false, error: String((e && e.message) || e) }) }
 })
 
@@ -790,6 +827,13 @@ app.get('/custom.css', (req, res) => {
   .sco-replybox button { background: #272729; color: #d7dadc; border: 1px solid #45474a; border-radius: 4px; padding: 3px 14px; cursor: pointer; font: inherit; }
   .sco-replybox .sco-send { background: #4fbcff; color: #03263b; border-color: #4fbcff; font-weight: 700; }
   .sco-replybox .sco-reply-status { color: #818384; font-size: 12px; }
+  /* Your own comments: highlight + edit/delete actions */
+  .sco-comments-panel .comment.sco-mine > .entry { border-left: 3px solid #4fbcff !important; padding-left: 7px !important; background: rgba(79,188,255,0.08) !important; }
+  .sco-comments-panel .comment.sco-mine > .entry .tagline .author { color: #4fbcff !important; font-weight: 700 !important; }
+  .sco-comments-panel .comment.sco-mine > .entry .tagline .author::after { content: " (you)"; color: #4fbcff; font-weight: 700; }
+  .sco-own-actions { margin-left: 6px !important; }
+  .sco-own-actions .sco-edit { color: #4fbcff !important; font-weight: 600 !important; cursor: pointer; }
+  .sco-own-actions .sco-del { color: #ff6b6b !important; font-weight: 600 !important; cursor: pointer; }
   `)
 })
 
@@ -879,6 +923,7 @@ app.get('/custom.js', (req, res) => {
       stripOnclick(panel);
       wireLoadMore(panel);
       wireReplies(panel);
+      tagAllMine();
     }).catch(function(){ panel.innerHTML = '<div class="sco-cmt-status">Could not load comments.</div>'; });
   }
 
@@ -935,9 +980,71 @@ app.get('/custom.js', (req, res) => {
           var listing = child.querySelector('.sitetable'); if (!listing){ listing = document.createElement('div'); listing.className = 'sitetable'; child.appendChild(listing); }
           while (tmp.firstChild) listing.insertBefore(tmp.firstChild, listing.firstChild);
           box.remove();
+          tagAllMine();
         } else { status.textContent = 'posted'; setTimeout(function(){ box.remove(); }, 700); }
       })
       .catch(function(){ status.textContent = 'failed to send'; btn.disabled = false; });
+  }
+
+  // ---- Your own comments: highlight + edit + delete ----
+  var ME = null;
+  function loadMe(){ fetch('/scroller/me').then(function(r){ return r.json(); }).then(function(j){ ME = (j && j.name) || null; if (ME) tagAllMine(); }).catch(function(){}); }
+  function tagAllMine(){ if (!ME) return; var cs = document.querySelectorAll('.sco-comments-panel .comment[data-author]'); for (var i = 0; i < cs.length; i++) tagMine(cs[i]); }
+  function tagMine(comment){
+    if (!ME || comment.getAttribute('data-author') !== ME || comment.classList.contains('sco-mine')) return;
+    comment.classList.add('sco-mine');
+    addOwnActions(comment);
+  }
+  function addOwnActions(comment){
+    var entry = comment.querySelector(':scope > .entry');
+    var buttons = entry && entry.querySelector('.flat-list.buttons');
+    if (!buttons || buttons.querySelector('.sco-own-actions')) return;
+    var li = document.createElement('li'); li.className = 'sco-own-actions';
+    var edit = document.createElement('a'); edit.href = 'javascript:void(0)'; edit.className = 'sco-edit'; edit.textContent = 'edit';
+    var del = document.createElement('a'); del.href = 'javascript:void(0)'; del.className = 'sco-del'; del.textContent = 'delete';
+    li.appendChild(edit); li.appendChild(document.createTextNode(' ')); li.appendChild(del);
+    buttons.appendChild(li);
+    edit.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); editComment(comment); });
+    del.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); delComment(comment, del); });
+  }
+  function editComment(comment){
+    var entry = comment.querySelector(':scope > .entry');
+    var open = entry.querySelector(':scope > .sco-editbox');
+    if (open){ open.querySelector('textarea').focus(); return; }
+    var id = comment.getAttribute('data-fullname');
+    var box = document.createElement('div'); box.className = 'sco-replybox sco-editbox';
+    box.innerHTML = '<textarea class="sco-reply-ta" rows="4"></textarea><div class="sco-reply-row"><button type="button" class="sco-send">Save</button><button type="button" class="sco-cancel">Cancel</button><span class="sco-reply-status"></span></div>';
+    entry.appendChild(box);
+    var ta = box.querySelector('textarea'); ta.value = 'loading...'; ta.disabled = true;
+    fetch('/scroller/raw?id=' + encodeURIComponent(id)).then(function(r){ return r.json(); }).then(function(j){ ta.value = (j && j.body) || ''; ta.disabled = false; ta.focus(); }).catch(function(){ ta.value = ''; ta.disabled = false; });
+    box.querySelector('.sco-cancel').addEventListener('click', function(){ box.remove(); });
+    box.querySelector('.sco-send').addEventListener('click', function(){ saveEdit(comment, box); });
+    ta.addEventListener('keydown', function(e){ if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); saveEdit(comment, box); } });
+  }
+  function saveEdit(comment, box){
+    var ta = box.querySelector('textarea'); var text = ta.value; if (!text.trim()) return;
+    var id = comment.getAttribute('data-fullname'); var status = box.querySelector('.sco-reply-status'); var btn = box.querySelector('.sco-send');
+    status.textContent = 'saving...'; btn.disabled = true;
+    fetch('/scroller/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thing_id: id, text: text }) })
+      .then(function(r){ return r.json(); }).then(function(j){
+        var errs = j && j.json && j.json.errors; if (errs && errs.length){ status.textContent = 'error: ' + errs[0].join(' '); btn.disabled = false; return; }
+        var things = j && j.json && j.json.data && j.json.data.things;
+        if (things && things[0] && things[0].data && things[0].data.contentHTML){
+          var tmp = document.createElement('div'); tmp.innerHTML = decodeHTML(things[0].data.contentHTML); stripOnclick(tmp);
+          var nb = tmp.querySelector('.usertext-body'); var ob = comment.querySelector(':scope > .entry .usertext-body');
+          if (nb && ob){ ob.parentNode.replaceChild(nb, ob); }
+          box.remove();
+        } else { status.textContent = 'saved'; setTimeout(function(){ box.remove(); }, 600); }
+      }).catch(function(){ status.textContent = 'failed'; btn.disabled = false; });
+  }
+  function delComment(comment, link){
+    if (link.getAttribute('data-confirm') !== '1'){ link.setAttribute('data-confirm', '1'); link.textContent = 'confirm?'; setTimeout(function(){ if (link.getAttribute('data-confirm') === '1'){ link.removeAttribute('data-confirm'); link.textContent = 'delete'; } }, 3000); return; }
+    var id = comment.getAttribute('data-fullname'); link.textContent = 'deleting...';
+    fetch('/scroller/del', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) })
+      .then(function(r){ return r.json(); }).then(function(j){
+        var ob = comment.querySelector(':scope > .entry .usertext-body'); if (ob) ob.innerHTML = '<p><em>[deleted]</em></p>';
+        comment.style.opacity = '0.5'; link.textContent = 'deleted';
+      }).catch(function(){ link.textContent = 'failed'; });
   }
 
   // Make Reddit's "load more comments" / "continue this thread" stubs load inline.
@@ -975,6 +1082,7 @@ app.get('/custom.js', (req, res) => {
       stripOnclick(listing);
       if (parent && parent.parentNode){ parent.replaceWith(listing); } else if (stub.parentNode){ stub.replaceWith(listing); }
       if (panel) wireLoadMore(panel);
+      tagAllMine();
     }).catch(function(){ stub.textContent = 'failed to load'; });
   }
 
@@ -1060,6 +1168,7 @@ app.get('/custom.js', (req, res) => {
 
   function init(){
     scan();
+    loadMe();
     var st = document.querySelector('#siteTable');
     if (st){
       var obs = new MutationObserver(function(muts){
