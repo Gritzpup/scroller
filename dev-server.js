@@ -966,7 +966,7 @@ app.get('/custom.js', (req, res) => {
           for (var j = 0; j < ad.length; j++){
             var n = ad[j];
             if (n.nodeType !== 1) continue;
-            if (n.matches && n.matches('.thing.link')) addBtn(n);
+            if (n.matches && n.matches('.thing.link')) { addBtn(n); wireSelftext(n); wireYouTube(n); }
             else if (n.querySelectorAll) scan(n);
           }
         }
