@@ -1124,12 +1124,12 @@ app.get('/custom.js', (req, res) => {
   function clean(s){ if(!s) return null; s = s.split('&')[0].split('?')[0].split('/')[0].split('#')[0]; return /^[\\w-]{6,20}$/.test(s) ? s : null; }
   function ytId(thing){
     var u = thing.getAttribute('data-url') || ((thing.querySelector('a.title')||{}).href) || '';
-    if (u.indexOf('youtu.be/') >= 0) return clean(u.split('youtu.be/')[1]);
-    if (u.indexOf('watch?v=') >= 0) return clean(u.split('watch?v=')[1]);
-    if (u.indexOf('/embed/') >= 0) return clean(u.split('/embed/')[1]);
-    if (u.indexOf('/shorts/') >= 0) return clean(u.split('/shorts/')[1]);
-    if (u.indexOf('/live/') >= 0) return clean(u.split('/live/')[1]);
-    return null;
+    var low = u.toLowerCase();
+    // Only treat as YouTube if it's actually a YouTube host (otherwise non-YouTube
+    // links containing "watch?v="/"/embed/"/"/v/" were falsely matched -> "could not load video").
+    if (low.indexOf('youtube.com/') < 0 && low.indexOf('youtu.be/') < 0 && low.indexOf('youtube-nocookie.com/') < 0) return null;
+    function after(marker){ var i = low.indexOf(marker); return i < 0 ? null : clean(u.substring(i + marker.length)); }
+    return after('youtu.be/') || after('watch?v=') || after('/embed/') || after('/shorts/') || after('/live/') || after('/v/');
   }
   function wireYouTube(thing){
     var id = ytId(thing);
