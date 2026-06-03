@@ -714,11 +714,10 @@ app.get('/custom.css', (req, res) => {
   }
   .expando.sco-side > .sco-comments-panel.sco-side-panel {
     margin: 0 !important;
-    height: 460px !important;
-    max-height: 460px !important;
     flex: 1 1 auto !important;
     min-width: 300px !important;
     overflow-y: auto !important;
+    /* height is set inline by JS to match the media height (scrollable within it) */
   }
   /* Ensure the video or media content takes the remaining space */
   .expando.sco-side > .media-preview,
@@ -801,13 +800,28 @@ app.get('/custom.js', (req, res) => {
   }
 
   function place(thing, panel){
-    // If media is expanded (video OR image), open comments BESIDE it on the right.
+    // If media is expanded (video OR image), open comments BESIDE it on the right,
+    // stretched to the same height as the media (and scrollable within that).
     var expando = thing.querySelector('.expando');
     if (expando && expando.offsetHeight > 40 && expando.querySelector('.reddit-video-player-root, img, video, .media-preview')){
-      expando.classList.add('sco-side'); panel.classList.add('sco-side-panel'); expando.appendChild(panel); return;
+      expando.classList.add('sco-side'); panel.classList.add('sco-side-panel'); expando.appendChild(panel);
+      matchSideHeight(expando, panel);
+      return;
     }
     var entry = thing.querySelector('.entry');
     (entry || thing).appendChild(panel);
+  }
+
+  function matchSideHeight(expando, panel){
+    function apply(){
+      var media = expando.querySelector('.reddit-video-player-root') || expando.querySelector('video') || expando.querySelector('img') || expando.querySelector('.media-preview');
+      if (media){ var h = media.offsetHeight; if (h > 80) panel.style.height = h + 'px'; }
+    }
+    apply();
+    var v = expando.querySelector('video');
+    if (v){ v.addEventListener('loadedmetadata', apply); v.addEventListener('loadeddata', apply); v.addEventListener('resize', apply); }
+    var img = expando.querySelector('img'); if (img && !img.complete) img.addEventListener('load', apply);
+    setTimeout(apply, 400); setTimeout(apply, 1200); setTimeout(apply, 2500);
   }
   function unside(thing){ var m = thing.querySelector('.expando.sco-side'); if (m) m.classList.remove('sco-side'); }
 
