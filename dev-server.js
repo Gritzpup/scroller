@@ -834,6 +834,9 @@ app.get('/custom.css', (req, res) => {
   .sco-own-actions { margin-left: 6px !important; }
   .sco-own-actions .sco-edit { color: #4fbcff !important; font-weight: 600 !important; cursor: pointer; }
   .sco-own-actions .sco-del { color: #ff6b6b !important; font-weight: 600 !important; cursor: pointer; }
+  /* Image lightbox (click an image -> overlay instead of navigating away) */
+  .sco-lightbox { position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; background: rgba(0,0,0,0.92) !important; display: flex !important; align-items: center !important; justify-content: center !important; cursor: zoom-out !important; }
+  .sco-lightbox img { max-width: 96vw !important; max-height: 96vh !important; object-fit: contain !important; box-shadow: 0 0 40px rgba(0,0,0,0.6) !important; }
   `)
 })
 
@@ -1167,7 +1170,31 @@ app.get('/custom.js', (req, res) => {
     }
   }
 
-  function scan(root){ var p = (root || document).querySelectorAll('#siteTable > .thing.link[data-fullname]'); for (var i = 0; i < p.length; i++) { addBtn(p[i]); wireSelftext(p[i]); wireYouTube(p[i]); } }
+  // Open reddit images in an in-page lightbox instead of navigating away (which
+  // loses your scroll position on Back).
+  function wireImage(thing){
+    var du = thing.getAttribute('data-url') || '';
+    if (du.indexOf('/media/i/') < 0) return; // only reddit single-image posts
+    var url = du.indexOf('/api') === 0 ? du : ('/api/media/i/' + du.split('/media/i/')[1]);
+    var th = thing.querySelector('a.thumbnail');
+    if (!th || th.getAttribute('data-sco-img')) return;
+    th.setAttribute('data-sco-img', '1');
+    th.removeAttribute('data-proxy-href');
+    th.setAttribute('href', 'javascript:void(0)');
+    th.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); openLightbox(url); }, true);
+  }
+  function openLightbox(url){
+    var ov = document.createElement('div'); ov.className = 'sco-lightbox';
+    var img = document.createElement('img'); img.src = url; img.alt = '';
+    ov.appendChild(img);
+    document.documentElement.appendChild(ov); // outside body's zoom -> fills the real viewport
+    function close(){ if (ov.parentNode) ov.parentNode.removeChild(ov); document.removeEventListener('keydown', onKey, true); }
+    function onKey(e){ if (e.key === 'Escape') close(); }
+    ov.addEventListener('click', close);
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  function scan(root){ var p = (root || document).querySelectorAll('#siteTable > .thing.link[data-fullname]'); for (var i = 0; i < p.length; i++) { addBtn(p[i]); wireSelftext(p[i]); wireYouTube(p[i]); wireImage(p[i]); } }
 
   function init(){
     scan();
@@ -1180,7 +1207,7 @@ app.get('/custom.js', (req, res) => {
           for (var j = 0; j < ad.length; j++){
             var n = ad[j];
             if (n.nodeType !== 1) continue;
-            if (n.matches && n.matches('.thing.link')) { addBtn(n); wireSelftext(n); wireYouTube(n); }
+            if (n.matches && n.matches('.thing.link')) { addBtn(n); wireSelftext(n); wireYouTube(n); wireImage(n); }
             else if (n.querySelectorAll) scan(n);
           }
         }
