@@ -1159,7 +1159,10 @@ app.get('/custom.js', (req, res) => {
         var startPlay = function(){ if (msg) msg.style.display = 'none'; try { var p = vid.play(); if (p && p.catch) p.catch(function(){}); } catch(e){} };
         vid.addEventListener('loadeddata', startPlay);
         vid.addEventListener('canplay', startPlay);
-        vid.addEventListener('error', function(){ if (msg) msg.textContent = 'Could not load this video.'; });
+        vid.addEventListener('error', function(){
+          // YouTube blocked inline extraction (anti-bot) — offer a direct link instead.
+          exp.innerHTML = '<div class="sco-cmt-status" style="padding:18px;">YouTube blocked inline playback for this video. <a href="https://www.youtube.com/watch?v=' + id + '" target="_blank" rel="noopener" style="color:#4fbcff;font-weight:700;">▶ Watch on YouTube</a></div>';
+        });
       }
     }
   }
@@ -1200,24 +1203,29 @@ app.get('/custom.js', (req, res) => {
 const YT_DLP = join(__dirname, 'yt-dlp')
 const YT_ENV = { ...process.env, PATH: '/home/ubuntubox2/.local/bin:' + (process.env.PATH || '') }
 const ytCache = new Map()
-app.get('/yt', (req, res) => {
-  const v = String(req.query.v || '')
-  if (!/^[\w-]{6,20}$/.test(v)) return res.status(400).send('bad video id')
-  const hit = ytCache.get(v)
-  if (hit && Date.now() - hit.ts < 60 * 60 * 1000) return res.redirect(hit.url)
+function ytExtract(v, cb) {
   execFile(YT_DLP, [
     '--cookies-from-browser', 'chromium:/home/ubuntubox2/.hermes/chrome-debug',
     '--no-warnings', '-f', '18/22/best[protocol^=http][vcodec!=none][acodec!=none]',
     '-g', 'https://www.youtube.com/watch?v=' + v
   ], { env: YT_ENV, timeout: 90000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
     const url = String(stdout || '').trim().split('\n')[0]
-    if (err || !url.startsWith('http')) {
-      console.error('❌ yt-dlp failed for', v, ':', (stderr || (err && err.message) || '').slice(0, 300))
-      return res.status(502).send('Could not extract video')
-    }
-    console.log('▶️ youtube', v, '->', url.slice(0, 70))
-    ytCache.set(v, { url, ts: Date.now() })
-    res.redirect(url)
+    cb(url.startsWith('http') ? url : null, (stderr || (err && err.message) || ''))
+  })
+}
+app.get('/yt', (req, res) => {
+  const v = String(req.query.v || '')
+  if (!/^[\w-]{6,20}$/.test(v)) return res.status(400).send('bad video id')
+  const hit = ytCache.get(v)
+  if (hit && Date.now() - hit.ts < 60 * 60 * 1000) return res.redirect(hit.url)
+  ytExtract(v, (url, errText) => {
+    if (url) { ytCache.set(v, { url, ts: Date.now() }); console.log('▶️ youtube', v); return res.redirect(url) }
+    // Retry once — YouTube's anti-bot wall is often intermittent.
+    setTimeout(() => ytExtract(v, (url2, errText2) => {
+      if (url2) { ytCache.set(v, { url: url2, ts: Date.now() }); console.log('▶️ youtube', v, '(retry)'); return res.redirect(url2) }
+      console.error('❌ yt-dlp failed for', v, ':', (errText2 || errText).slice(0, 200))
+      res.status(502).send('Could not extract video')
+    }), 1200)
   })
 })
 
